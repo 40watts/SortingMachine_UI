@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TriCell Pilot</title>
+  <link rel="icon" href="/brand-mark.png?v=20260511r1">
+  <link rel="stylesheet" href="/styles.css?v=20260516alarm1">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="logo-strip">
+        <button class="brand" id="brandButton" type="button" title="TriCell Pilot">
+          <span class="brand-mark">
+            <img src="/brand-mark.png?v=20260511r1" alt="TriCell Pilot">
+          </span>
+          <span class="brand-copy">
+            <strong>TriCell Pilot</strong>
+            <span>Pilotage tri cellules 18650 / 21700</span>
+          </span>
+        </button>
+        <div class="logo-divider"></div>
+        <div class="topbar-title" id="topbarStatus">Initialisation...</div>
+      </div>
+      <div class="topbar-badges">
+        <button class="action-btn" id="refreshButton" type="button">Actualiser</button>
+        <button class="action-btn primary" id="maintenanceShortcutButton" type="button">Maintenance</button>
+      </div>
+    </header>
+
+    <section class="control-dock" aria-label="Pilotage principal">
+      <div class="dock-status">
+        <span id="commandMachineState">Machine en attente</span>
+        <strong id="commandMachineDetail">Prêt à démarrer</strong>
+        <small id="commandLaneState">Ligne --</small>
+      </div>
+
+      <div class="lot-gate">
+        <div class="lot-gate-title">
+          <div>
+            <span>Lot cellules Odoo</span>
+            <strong id="commandLotState">Aucun lot sélectionné</strong>
+          </div>
+          <button class="action-btn ghost" type="button" id="resetLinesButton">Recommencer apprentissage</button>
+          <button class="action-btn ghost" type="button" id="closeLotButton">Clôturer le lot</button>
+        </div>
+        <div class="odoo-search-row">
+          <input id="odooLotSearchInput" type="search" autocomplete="off" placeholder="Rechercher un lot suivi Odoo : CEL21700, CEL18650, 21700, 18650...">
+          <button class="action-btn" type="button" id="odooLotSearchButton">Rechercher</button>
+        </div>
+        <form class="odoo-link-form" id="odooLinkForm">
+          <input id="odooLotReferenceInput" type="text" autocomplete="off" placeholder="Lot / série Odoo suivi">
+          <input id="odooProductInput" type="text" autocomplete="off" placeholder="Produit cellule associé">
+          <input id="odooLotNameInput" type="text" autocomplete="off" placeholder="Nom / note optionnel">
+          <button class="action-btn primary" type="submit">Associer lot</button>
+        </form>
+        <div class="odoo-suggestions" id="odooSuggestions" aria-label="Lots proposés"></div>
+      </div>
+
+      <div class="machine-command-zone">
+        <div class="machine-alarm-banner hidden" id="machineAlarmBanner" aria-live="polite"></div>
+        <small id="commandStartGuard">Démarrage autorisé, lot Odoo optionnel</small>
+        <div class="machine-command-buttons">
+        <button class="machine-command-btn start" type="button" data-command="START" title="Démarrer la machine">
+          <strong>DÉMARRER</strong>
+        </button>
+        <button class="machine-command-btn reset" type="button" data-command="RESET" title="Réarmer l'automate si le statut 7 bloque le départ">
+          <strong>RÉARMER</strong>
+        </button>
+        <button class="machine-command-btn pause" type="button" data-command="PAUSE">
+          <strong>PAUSE</strong>
+        </button>
+        <button class="machine-command-btn stop" type="button" data-command="STOP">
+          <strong>STOP</strong>
+        </button>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats" id="stats"></section>
+
+    <section class="notification hidden" id="notification"></section>
+
+    <nav class="tabs">
+      <button class="chip active" type="button" data-tab="production">Production</button>
+      <button class="chip" type="button" data-tab="recipes">Lots / Recettes</button>
+      <button class="chip" type="button" data-tab="history">Historique / Exports</button>
+      <button class="chip" type="button" data-tab="diagnostic">Diagnostic</button>
+      <button class="chip hidden" type="button" data-tab="maintenance" id="maintenanceTabButton">Maintenance</button>
+    </nav>
+
+    <main class="content">
+      <section class="view is-active" data-view="production">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow soft">Production</span>
+              <h2>Pilotage machine</h2>
+            </div>
+            <div class="panel-actions">
+              <button class="small-reset-lines-btn" type="button" id="resetLinesPilotButton">Recommencer apprentissage</button>
+              <div class="topbar-badges" id="productionPills"></div>
+            </div>
+          </div>
+
+          <div class="browser-layout production-layout">
+            <section class="catalog-pane operator-pane">
+              <div class="pane-topline">
+                <span class="pane-caption">État lot et machine</span>
+              </div>
+              <div class="machine-state" id="machineStateBlock"></div>
+            </section>
+
+            <aside class="detail-pane live-pane">
+              <div class="pane-topline">
+                <span class="pane-caption">Mesures et alarmes</span>
+              </div>
+              <div class="big-metrics" id="bigMetrics"></div>
+              <div class="ng-focus" id="ngCharacteristics"></div>
+              <div class="alarm-stack" id="priorityAlarms"></div>
+            </aside>
+
+            <aside class="detail-pane distribution-pane">
+              <div class="pane-topline">
+                <span class="pane-caption">Répartition lignes</span>
+              </div>
+              <div id="laneSummary"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow soft">Modèle du lot</span>
+              <h2>Intervalles et apprentissage</h2>
+            </div>
+          </div>
+          <div class="support-grid support-grid-duo">
+            <article class="support-card">
+              <div class="pane-topline"><span class="pane-caption">Apprentissage</span></div>
+              <div id="learningSummary"></div>
+            </article>
+            <article class="support-card">
+              <div class="pane-topline"><span class="pane-caption">Intervalles résistance lignes 1 à 9</span></div>
+              <div id="qualityIntervalChart"></div>
+            </article>
+          </div>
+        </section>
+
+      </section>
+
+      <section class="view" data-view="recipes">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow soft">Configuration</span>
+              <h2>Lots et recettes</h2>
+            </div>
+            <div class="filters">
+              <div class="form-grid compact">
+                <label>
+                  <span>Type cellule</span>
+                  <select id="cellTypeSelect">
+                    <option value="21700">21700</option>
+                    <option value="18650">18650</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Mode de tri</span>
+                  <select id="sortingModeSelect">
+                    <option value="INTELLIGENT_GOOD_NG">GOOD / NG intelligent</option>
+                    <option value="LEGACY">Legacy constructeur</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="browser-layout recipe-layout">
+            <section class="catalog-pane">
+              <div class="pane-topline">
+                <span class="pane-caption">Recette intelligente</span>
+                <button class="action-btn primary" type="button" id="saveIntelligentRecipeButton">Enregistrer</button>
+              </div>
+              <div id="intelligentRecipeForm"></div>
+            </section>
+            <aside class="detail-pane">
+              <div class="pane-topline">
+                <span class="pane-caption">Recette legacy</span>
+                <button class="action-btn" type="button" id="saveLegacyRecipeButton">Enregistrer</button>
+              </div>
+              <div id="legacyRecipeForm"></div>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" data-view="history">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow soft">Suivi</span>
+              <h2>Historique et exports</h2>
+            </div>
+            <div class="topbar-badges">
+              <a class="action-btn primary" href="/api/export/cells-audit-csv" target="_blank" rel="noopener">Audit cellules CSV</a>
+              <a class="action-btn" href="/api/export/recipes/json" target="_blank" rel="noopener">Recettes JSON</a>
+            </div>
+          </div>
+          <div class="browser-layout">
+            <section class="catalog-pane">
+              <div class="pane-topline"><span class="pane-caption">Audit cellules</span></div>
+              <div id="historyTable"></div>
+            </section>
+            <aside class="detail-pane">
+              <div class="pane-topline"><span class="pane-caption">Lots récents</span></div>
+              <div id="lotHistory"></div>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" data-view="diagnostic">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow soft">Diagnostic</span>
+              <h2>Lecture machine et audit</h2>
+            </div>
+            <div class="topbar-badges">
+              <a class="action-btn" href="/api/export/diagnostic/json" target="_blank" rel="noopener">Diagnostic JSON</a>
+              <a class="action-btn" href="/api/export/runtime-trace" target="_blank" rel="noopener">Runtime trace</a>
+              <a class="action-btn" href="/api/export/observation/csv" target="_blank" rel="noopener">Observations CSV</a>
+            </div>
+          </div>
+          <div class="browser-layout">
+            <section class="catalog-pane">
+              <div class="pane-topline"><span class="pane-caption">Résumé machine</span></div>
+              <div id="diagnosticSummary"></div>
+              <div class="pane-topline space-top"><span class="pane-caption">Notes</span></div>
+              <div id="diagnosticNotes"></div>
+            </section>
+            <aside class="detail-pane">
+              <div class="pane-topline"><span class="pane-caption">Écarts de seuils</span></div>
+              <div id="thresholdDiffs"></div>
+              <div class="pane-topline space-top"><span class="pane-caption">Trace runtime</span></div>
+              <div id="runtimeTrace"></div>
+            </aside>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" data-view="maintenance">
+        <section class="panel queue-panel">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow soft">Maintenance</span>
+              <h2>Maintenance et essais directs</h2>
+            </div>
+          </div>
+          <div class="browser-layout">
+            <section class="catalog-pane">
+              <div class="pane-topline"><span class="pane-caption">Commandes prouvées</span></div>
+              <div id="validatedMaintenance"></div>
+            </section>
+            <aside class="detail-pane">
+              <div class="pane-topline"><span class="pane-caption">Essais non validés terrain</span></div>
+              <div id="expertSessionBanner"></div>
+              <div id="expertMaintenance"></div>
+            </aside>
+          </div>
+          <article class="piston-test-card">
+            <div class="pane-topline">
+              <span class="pane-caption">Test pistons lignes 1 à NG</span>
+            </div>
+            <div id="pistonTester"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js?v=20260520ngrelease1"></script>
+</body>
+</html>

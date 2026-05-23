@@ -1,0 +1,50 @@
+# Runtime and build outputs
+backend/
+frontend/
+desktop_app/
+desktop_v2/bin/
+backend/.venv/
+backend/venv/
+frontend/node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+*.pdb
+*.user
+*.suo
+
+# WebView2 package cache / extracted NuGet payload
+webview2_pkg/
+webview2.zip
+webview2.nupkg
+
+# Machine runtime data and backups
+desktop_v2/app/data/
+*.bak
+*.bak_*
+*.bak-*
+*.corrupt_*
+*.log
+runtime_trace.csv
+history.csv
+observation.csv
+odoo_cell_tests.csv
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+ODOO.txt
+odoo_config.json
+*.secret
+*.secret.*
+secrets/
+
+# Local OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vs/
+.idea/
+.vscode/
