@@ -48,6 +48,14 @@ Ce script verifie:
 - controles statiques anti-regression;
 - smoke test API local.
 
+## Quality gate CI / sans machine
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File desktop_v2\tools\CiQualityChecks.ps1 -Root .
+```
+
+Ce script build l'application, execute les regressions console et les checks statiques sans demarrer l'application locale.
+
 ## Regle metier actuelle
 
 - Ligne 10: apprentissage du lot, gel obligatoire a 19 cellules.
@@ -62,6 +70,7 @@ Ce script verifie:
 ## Documentation
 
 - `desktop_v2/docs/code-quality-audit.md`: audit qualite, architecture et dette a eliminer avant Git.
+- `desktop_v2/docs/architecture.md`: frontieres du produit actif, modules et plan de decoupage.
 - `desktop_v2/docs/pre-git-readiness.md`: etat date avant Git, validations et limites restantes.
 - `desktop_v2/docs/quality-interval-routing.md`: logique de tri 9 intervalles.
 - `desktop_v2/docs/ai-context.md`: contexte court pour reprise par IA ou nouvel auditeur.

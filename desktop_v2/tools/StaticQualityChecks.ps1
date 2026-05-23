@@ -30,12 +30,15 @@ $requiredDocs = @(
     "README.md",
     "OPERATOR_REQUIREMENTS.md",
     "desktop_v2/docs/code-quality-audit.md",
+    "desktop_v2/docs/architecture.md",
     "desktop_v2/docs/quality-interval-routing.md",
     "desktop_v2/docs/ai-context.md",
     "desktop_v2/docs/operator-guide.md",
     "desktop_v2/docs/api-contract.md",
     "desktop_v2/docs/git-hygiene.md",
     "desktop_v2/docs/pre-git-readiness.md",
+    "desktop_v2/tools/CiQualityChecks.ps1",
+    ".github/workflows/windows-ci.yml",
     ".gitignore",
     ".gitattributes",
     ".env.example"
@@ -48,6 +51,7 @@ foreach ($doc in $requiredDocs) {
 $readme = Read-Text (Join-Path $Root "README.md")
 Assert-True ($readme -match "desktop_v2") "README racine: desktop_v2 non reference."
 Assert-True ($readme -match "test_desktop_v2\.bat") "README racine: quality gate non reference."
+Assert-True ($readme -match "CiQualityChecks\.ps1") "README racine: CI safe non reference."
 
 $runDesktop = Read-Text (Join-Path $Root "run_desktop.bat")
 $runApp = Read-Text (Join-Path $Root "run_app.bat")
@@ -73,9 +77,13 @@ Assert-True ($operator -match "Ne jamais simuler une micro-avance par une ecritu
 Assert-True ($operator -match "Avancer convoyeur seul") "Exigences operateur: degagement convoyeur seul non documente."
 
 $gitignore = Read-Text (Join-Path $Root ".gitignore")
-foreach ($protected in @("desktop_v2/bin/", "desktop_app/", "backend/", "frontend/", "webview2_pkg/", "webview2.zip", "webview2.nupkg", "ODOO.txt", "odoo_config.json", ".env.*", "*.corrupt_*")) {
+foreach ($protected in @("desktop_v2/bin/", "desktop_v2/app/data/", "desktop_app/", "backend/", "frontend/", "webview2_pkg/", "webview2.zip", "webview2.nupkg", "ODOO.txt", "odoo_config.json", ".env.*", "*.corrupt_*")) {
     Assert-True ($gitignore -match [regex]::Escape($protected)) ".gitignore ne protege pas: $protected"
 }
+
+$ciWorkflow = Read-Text (Join-Path $Root ".github/workflows/windows-ci.yml")
+Assert-True ($ciWorkflow -match [regex]::Escape("CiQualityChecks.ps1")) "CI: workflow Windows doit executer CiQualityChecks.ps1."
+Assert-True ($ciWorkflow -notmatch [regex]::Escape("ApiSmokeCheck.ps1")) "CI: ne doit pas lancer ApiSmokeCheck, qui peut demarrer l'application locale."
 
 foreach ($secretName in @("ODOO.txt", "odoo_config.json", ".env")) {
     $matches = Get-ChildItem -Path $Root -Recurse -Force -File -ErrorAction SilentlyContinue |

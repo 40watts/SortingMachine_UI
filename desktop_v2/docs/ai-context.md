@@ -29,6 +29,7 @@ Ne pas travailler dans `backend/`, `frontend/` ou `desktop_app/` sauf pour compa
 ## Fichiers a lire en premier
 
 - `docs/code-quality-audit.md`
+- `docs/architecture.md`
 - `docs/quality-interval-routing.md`
 - `docs/git-hygiene.md`
 - `docs/pre-git-readiness.md`

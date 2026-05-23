@@ -28,6 +28,7 @@ Ce document sert de point d'entree pour un audit technique externe. Il explique 
 - `tools/StaticQualityChecks.ps1`: controles statiques anti-regression.
 - `tools/ApiSmokeCheck.ps1`: smoke test API local.
 - `tools/RepositoryPreflight.ps1`: controle avant Git des secrets et artefacts interdits.
+- `tools/CiQualityChecks.ps1`: build + regressions console + checks statiques, sans demarrer l'application.
 
 ## Points de refactor deja faits
 
@@ -40,9 +41,11 @@ Ce document sert de point d'entree pour un audit technique externe. Il explique 
 - `run_app.bat` redirige maintenant vers `run_desktop.bat` au lieu de lancer l'ancien backend.
 - `run_desktop.bat` build directement `build_desktop_v2.bat`.
 - Extraction de `OdooConfigLocator` hors de `MachineState`: les secrets ne sont plus lies au fichier orchestrateur.
+- Extraction de `ApiContractCatalog` hors de `MachineState`: le contrat API est isole du runtime machine.
 - Verrouillage UI de la recette 19 cellules: `LEARNING_SAMPLE_TARGET = 19`, ligne 10 apprentissage, lignes 1-9 intervalles IR, voie NG fixe.
 - Recette C# par defaut alignee sur `QualityBandRouting.BuildDefaultGoodLanes()` et `LearningLaneId`.
 - Preflight Git ajoute et execute: secrets, artefacts runtime et anciens dossiers exclus du scope Git.
+- Workflow GitHub Actions Windows ajoute pour executer le quality gate safe.
 
 ## Tests reproductibles
 
@@ -81,6 +84,7 @@ Ce script fait:
 - Scripts de lancement alignes sur l'application active.
 - Contrat API minimal et colonnes CSV obligatoires.
 - Validation 2026-05-23: `RepositoryPreflight OK`, `StaticQualityChecks OK`, `build_desktop_v2.bat` OK.
+- Validation safe CI: `CiQualityChecks.ps1` doit rester vert avant push.
 
 ## Dette technique a eliminer avant Git
 

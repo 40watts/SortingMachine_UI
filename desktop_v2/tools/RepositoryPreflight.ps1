@@ -19,6 +19,7 @@ Assert-True (Test-Path $gitignore) ".gitignore manquant."
 $gitignoreText = [System.IO.File]::ReadAllText($gitignore, [System.Text.Encoding]::UTF8)
 foreach ($required in @(
     "desktop_v2/bin/",
+    "desktop_v2/app/data/",
     "desktop_app/",
     "backend/",
     "frontend/",
