@@ -1215,13 +1215,35 @@ function buildGaussianSvg(production, intervals) {
 
   const minCut = Number(intervals[0].IrMin);
   const maxCut = Number(intervals[intervals.length - 1].IrMax);
-  const sigmaRaw = Number(production?.SigmaIr || 0);
-  const sigma = sigmaRaw > 0.0001 ? sigmaRaw : Math.max(0.05, (maxCut - minCut) / 6);
-  const meanRaw = Number(production?.MeanIr || 0);
-  const mu = meanRaw > 0 ? meanRaw : (minCut + maxCut) / 2;
 
-  const xMin = Math.min(minCut, mu - 3.2 * sigma);
-  const xMax = Math.max(maxCut, mu + 3.2 * sigma);
+  // La courbe est ajustee sur les coupures calibrees (quantiles k/9 du lot reel),
+  // pas sur les stats d'apprentissage qui peuvent etre perimees apres calibration.
+  const cutZScores = [-1.2206, -0.7647, -0.4316, -0.1397, 0.1397, 0.4316, 0.7647, 1.2206];
+  const cuts = [];
+  for (let i = 0; i < intervals.length - 1; i++) {
+    cuts.push(Number(intervals[i].IrMax));
+  }
+  let mu;
+  let sigma;
+  if (cuts.length === cutZScores.length) {
+    const cutMean = cuts.reduce((a, b) => a + b, 0) / cuts.length;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < cuts.length; i++) {
+      num += cutZScores[i] * (cuts[i] - cutMean);
+      den += cutZScores[i] * cutZScores[i];
+    }
+    mu = cutMean;
+    sigma = den > 0 ? Math.max(0.01, num / den) : Math.max(0.05, (maxCut - minCut) / 6);
+  } else {
+    const sigmaRaw = Number(production?.SigmaIr || 0);
+    sigma = sigmaRaw > 0.0001 ? sigmaRaw : Math.max(0.05, (maxCut - minCut) / 6);
+    const meanRaw = Number(production?.MeanIr || 0);
+    mu = meanRaw > 0 ? meanRaw : (minCut + maxCut) / 2;
+  }
+
+  const xMin = minCut;
+  const xMax = maxCut;
   const W = 1000;
   const H = 250;
   const padL = 14;
@@ -1274,8 +1296,8 @@ function buildGaussianSvg(production, intervals) {
       <text x="${padL}" y="${plotBottom + 20}" class="gauss-axis-label">${formatNumber(xMin, 2)} mOhm</text>
       <text x="${muX.toFixed(1)}" y="${plotBottom + 20}" text-anchor="middle" class="gauss-axis-label">centre ${formatNumber(mu, 3)} mOhm</text>
       <text x="${W - padR}" y="${plotBottom + 20}" text-anchor="end" class="gauss-axis-label">${formatNumber(xMax, 2)} mOhm</text>
-      <text x="${W - padR}" y="${plotTop - 9}" text-anchor="end" class="gauss-axis-label">barres = cellules reelles - pointilles = objectif ${formatNumber(expected, 1)}/voie - courbe = modele (sigma ${formatNumber(sigma, 3)})</text>
-    </svg>`;
+    </svg>
+    <div class="gauss-legend muted">Barres vertes = cellules réelles par voie · pointillés gris = objectif ${formatNumber(expected, 1)}/voie · courbe orange = gaussienne ajustée aux coupures (sigma ${formatNumber(sigma, 3)})</div>`;
 
   return { svg, totalGood };
 }

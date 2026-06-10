@@ -1988,3 +1988,9 @@ body {
   font-size: 12px;
   fill: #6b7682;
 }
+
+.gauss-legend {
+  font-size: 12px;
+  margin-top: 4px;
+  text-align: center;
+}
