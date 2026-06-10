@@ -20,7 +20,7 @@ Construire un seul logiciel desktop Windows, en francais, qui pilote vraiment la
 - Rearmement machine et remise a zero logiciel de l'apprentissage sont separes.
 
 3. Commandes machine
-- Boutons `DEMARRER`, `PAUSE`, `STOP`.
+- Boutons principaux: `DEMARRER`, `REARMER`, `PAUSE`. `STOP` n'est plus sur le bandeau principal (un seul bouton d'arret pour l'operateur); il reste disponible en Maintenance et dans l'API, et `REARMER` l'envoie automatiquement si la machine est en marche.
 - `REARMER` / `RESET=26` est une commande operateur explicite dans TriCell Pilot. Elle ne doit jamais etre envoyee automatiquement par `DEMARRER`; l'operateur l'utilise seulement apres controle mecanique quand le statut automate `7` empeche de relancer.
 - L'automate ignore `RESET=26` tant qu'il est en marche (statut `8231=1`, constate par lecture directe le 10 juin 2026). `REARMER` doit donc reproduire le flux operateur constructeur: si le statut est `1`, envoyer d'abord `STOP=29`, attendre la sortie du run (max ~4 s), puis envoyer `26`. Trace `RESET_AUTO_STOP`.
 - Chaque station piston a un enable constructeur (`28414+i`, lignes 1..10 + NG=`28424`) qui doit valoir `1` pour que le PLC puisse tirer le piston, quels que soient les seuils. Constate par lecture directe le 10 juin 2026: les enables 1..10 etaient a 0 (mis a zero par les ecritures en bloc de mai) et seul le NG arme tirait. TriCell Pilot rearme AUTOMATIQUEMENT toute station a 0 (trace `PUSHER_STATIONS_AUTO_ARM`): a la connexion et juste avant chaque `DEMARRER`, un registre a la fois, jamais les sorties `28926..28936`. L'operateur n'a aucun bouton a utiliser. Le pre-vol DEMARRER avertit si une station reste desarmee malgre tout. L'interdiction historique vise les ecritures en bloc A ZERO, qui desarment la machine.

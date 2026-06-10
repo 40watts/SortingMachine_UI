@@ -1494,7 +1494,7 @@ function updateCommandAvailability(app) {
       : "PLC hors ligne";
   });
 
-  document.querySelectorAll('[data-command="PAUSE"], [data-command="STOP"]').forEach((button) => {
+  document.querySelectorAll('[data-command="PAUSE"]').forEach((button) => {
     button.dataset.logicDisabled = String(!app?.Connected);
     button.title = app?.Connected ? button.title : "PLC hors ligne";
   });
