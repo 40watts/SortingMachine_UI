@@ -72,7 +72,6 @@ namespace SortingMachineDesktop
         private const ushort PusherActiveValue = 1;
         private const ushort PusherInactiveValue = 0;
         private const ushort PusherResetReleasedValue = 1;
-        private const int PusherPreReleaseSettleMs = 90;
         private const int PusherEnableSettleMs = 80;
         private const int PusherPulseMs = 1000;
         private const int MaintenancePusherPulseMs = 1000;
@@ -2995,30 +2994,32 @@ namespace SortingMachineDesktop
                     BuildPusherCommandSnapshotNoLock(_config, resetRegister, enableRegister, outputRegister)
                 );
 
-                var preReleaseOk = PreparePusherLaneForMaintenancePulseNoLock(
-                    _config,
-                    "MAINTENANCE",
-                    commandName,
-                    "UI",
-                    "ligne=" + normalizedLane,
-                    enableRegister,
-                    outputRegister,
-                    "Test piston");
-
-                var enableOk = false;
-                if (preReleaseOk)
+                // Sequence minimale: exactement un aller-retour (sortie=1 puis sortie=0).
+                // L'enable de station reste arme en permanence (etat production constructeur):
+                // le cycler autour du test provoquait des mouvements parasites et un etat alterne.
+                var enableOk = true;
+                ushort enableValue;
+                if (!TryReadHoldingSingleNoLock(_config, enableRegister, out enableValue) || enableValue == 0)
                 {
                     enableOk = WritePistonIoMaintenanceSingleNoLock(_config, enableRegister, PusherActiveValue);
+                    _trace.Append("MAINTENANCE", commandName, enableOk ? "ENABLE_ARMED" : "ENABLE_ERROR", "UI", enableRegister.ToString(CultureInfo.InvariantCulture), PusherActiveValue.ToString(CultureInfo.InvariantCulture), "Station désarmée trouvée avant test : enable réarmé (et laissé armé).");
+                    Thread.Sleep(PusherEnableSettleMs);
                 }
-                _trace.Append("MAINTENANCE", commandName, enableOk ? "ENABLE_SENT" : "ENABLE_ERROR", "UI", enableRegister.ToString(CultureInfo.InvariantCulture), PusherActiveValue.ToString(CultureInfo.InvariantCulture), "Activation sortie piston.");
+
+                ushort outputValue;
+                if (TryReadHoldingSingleNoLock(_config, outputRegister, out outputValue) && outputValue != 0)
+                {
+                    WritePistonIoMaintenanceSingleNoLock(_config, outputRegister, PusherInactiveValue);
+                    _trace.Append("MAINTENANCE", commandName, "OUTPUT_RECOVERED", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherInactiveValue.ToString(CultureInfo.InvariantCulture), "Sortie restée à 1 trouvée avant test : remise à 0 pour garantir un front montant propre.");
+                    Thread.Sleep(PusherEnableSettleMs);
+                }
 
                 var outputOk = false;
                 var hasStateDuring = false;
                 if (enableOk)
                 {
-                    Thread.Sleep(PusherEnableSettleMs);
                     outputOk = WritePistonIoMaintenanceSingleNoLock(_config, outputRegister, PusherActiveValue);
-                    _trace.Append("MAINTENANCE", commandName, outputOk ? "OUTPUT_SENT" : "OUTPUT_ERROR", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherActiveValue.ToString(CultureInfo.InvariantCulture), "Impulsion sortie piston.");
+                    _trace.Append("MAINTENANCE", commandName, outputOk ? "OUTPUT_SENT" : "OUTPUT_ERROR", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherActiveValue.ToString(CultureInfo.InvariantCulture), "Impulsion sortie piston (aller).");
                     if (outputOk)
                     {
                         Thread.Sleep(MaintenancePusherPulseMs);
@@ -3035,13 +3036,10 @@ namespace SortingMachineDesktop
                 }
 
                 var outputReleaseOk = WritePistonIoMaintenanceSingleNoLock(_config, outputRegister, PusherInactiveValue);
-                _trace.Append("MAINTENANCE", commandName, outputReleaseOk ? "OUTPUT_RELEASE" : "OUTPUT_RELEASE_ERROR", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherInactiveValue.ToString(CultureInfo.InvariantCulture), "Relachement sortie piston.");
-
-                var enableReleaseOk = WritePistonIoMaintenanceSingleNoLock(_config, enableRegister, PusherInactiveValue);
-                _trace.Append("MAINTENANCE", commandName, enableReleaseOk ? "ENABLE_RELEASE" : "ENABLE_RELEASE_ERROR", "UI", enableRegister.ToString(CultureInfo.InvariantCulture), PusherInactiveValue.ToString(CultureInfo.InvariantCulture), "Retour mode auto apres test piston.");
+                _trace.Append("MAINTENANCE", commandName, outputReleaseOk ? "OUTPUT_RELEASE" : "OUTPUT_RELEASE_ERROR", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherInactiveValue.ToString(CultureInfo.InvariantCulture), "Relachement sortie piston (retour). L'enable de station reste armé.");
 
                 var hasStateAfter = TryReadHoldingSingleNoLock(_config, stateRegister, out stateAfter);
-                var ok = preReleaseOk && enableOk && outputOk && outputReleaseOk && enableReleaseOk;
+                var ok = enableOk && outputOk && outputReleaseOk;
                 _trace.Append(
                     "MAINTENANCE",
                     commandName,
@@ -3150,48 +3148,6 @@ namespace SortingMachineDesktop
             );
         }
 
-        private bool PreparePusherLaneForPulseNoLock(MachineConfig cfg, string traceCategory, string traceAction, string source, string laneDetail, ushort enableRegister, ushort outputRegister, string context)
-        {
-            var outputOffOk = WritePistonIoSingleNoLock(cfg, outputRegister, PusherInactiveValue);
-            var enableOffOk = WritePistonIoSingleNoLock(cfg, enableRegister, PusherInactiveValue);
-
-            Thread.Sleep(PusherPreReleaseSettleMs);
-
-            var ok = outputOffOk && enableOffOk;
-            _trace.Append(
-                traceCategory,
-                traceAction,
-                ok ? "PRE_RELEASE" : "PRE_RELEASE_ERROR",
-                source,
-                enableRegister.ToString(CultureInfo.InvariantCulture) + "/" + outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
-                context + " " + laneDetail + " : front montant force, sortie et enable de cette voie uniquement remis a 0 avant impulsion."
-            );
-
-            return ok;
-        }
-
-        private bool PreparePusherLaneForMaintenancePulseNoLock(MachineConfig cfg, string traceCategory, string traceAction, string source, string laneDetail, ushort enableRegister, ushort outputRegister, string context)
-        {
-            var outputOffOk = WritePistonIoMaintenanceSingleNoLock(cfg, outputRegister, PusherInactiveValue);
-            var enableOffOk = WritePistonIoMaintenanceSingleNoLock(cfg, enableRegister, PusherInactiveValue);
-
-            Thread.Sleep(PusherPreReleaseSettleMs);
-
-            var ok = outputOffOk && enableOffOk;
-            _trace.Append(
-                traceCategory,
-                traceAction,
-                ok ? "PRE_RELEASE" : "PRE_RELEASE_ERROR",
-                source,
-                enableRegister.ToString(CultureInfo.InvariantCulture) + "/" + outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
-                context + " " + laneDetail + " : front montant force, sortie et enable de cette voie uniquement remis a 0 avant impulsion maintenance."
-            );
-
-            return ok;
-        }
-
         private string BuildPusherCommandSnapshotNoLock(MachineConfig cfg, ushort resetRegister, ushort enableRegister, ushort outputRegister)
         {
             ushort resetValue;
@@ -3221,9 +3177,8 @@ namespace SortingMachineDesktop
                    ": ligne " + requestedLane +
                    " (voie physique " + physicalLane.ToString(CultureInfo.InvariantCulture) +
                    "), enable 4X " + enableRegister.ToString(CultureInfo.InvariantCulture) +
-                   " pre-relache a 0 puis = 1, sortie " +
-                   "4X " + outputRegister.ToString(CultureInfo.InvariantCulture) +
-                   " = 1 puis 0, enable relache a 0. Aucun reset 28295..28305 et aucun autre piston ne sont ecrits.";
+                   " laisse arme, sortie 4X " + outputRegister.ToString(CultureInfo.InvariantCulture) +
+                   " = 1 puis 0 (un seul aller-retour). Aucun reset 28295..28305 et aucun autre piston ne sont ecrits.";
         }
 
         public ContractBundle GetContracts()
