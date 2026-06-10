@@ -1175,10 +1175,10 @@ function buildQualityIntervalChart(production) {
 
   const minIr = Math.min(...intervals.map((item) => Number(item.IrMin || 0)));
   const maxIr = Math.max(...intervals.map((item) => Number(item.IrMax || 0)));
-  const span = Math.max(0.001, maxIr - minIr);
   const voltageMin = intervals[0]?.VoltageMin;
   const voltageMax = intervals[0]?.VoltageMax;
   const sampleCount = intervals[0]?.LearningSampleCount || production?.SampleCount || 0;
+  const gauss = buildGaussianSvg(production, intervals);
 
   return `
     <div class="interval-summary">
@@ -1194,32 +1194,90 @@ function buildQualityIntervalChart(production) {
         <span class="pane-caption">Echantillon fige</span>
         <strong>${formatInt(sampleCount)} cellules ligne 10</strong>
       </div>
+      <div>
+        <span class="pane-caption">Triees GOOD / NG</span>
+        <strong>${formatInt(gauss.totalGood)} / ${formatInt(production?.NgCount || 0)}</strong>
+      </div>
     </div>
-    <div class="interval-scroll">
-      <div class="interval-axis">
-        <span>${formatNumber(minIr, 3)} mOhm</span>
-        <span>${formatNumber(maxIr, 3)} mOhm</span>
-      </div>
-      <div class="interval-bars">
-        ${intervals.map((interval) => {
-          const left = ((Number(interval.IrMin || 0) - minIr) / span) * 100;
-          const width = Math.max(2.4, ((Number(interval.IrMax || 0) - Number(interval.IrMin || 0)) / span) * 100);
-          return `
-            <article class="interval-row">
-              <div class="interval-lane">Ligne ${escapeHtml(interval.LaneId || interval.Index || "--")}</div>
-              <div class="interval-track">
-                <div class="interval-bar" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%">
-                  <span>
-                    <b>${formatNumber(interval.IrMin, 3)}</b>
-                    <b>${formatNumber(interval.IrMax, 3)}</b>
-                  </span>
-                </div>
-              </div>
-              <div class="interval-range">${formatNumber(interval.IrMin, 3)} / ${formatNumber(interval.IrMax, 3)} mOhm</div>
-            </article>`;
-        }).join("")}
-      </div>
-    </div>`;
+    ${gauss.svg}`;
+}
+
+function buildGaussianSvg(production, intervals) {
+  const lanes = production?.Lanes || [];
+  const countByLane = {};
+  lanes.forEach((lane) => {
+    const physical = Number(lane.MachineCount);
+    const logical = Number(lane.CountAssigned);
+    countByLane[String(lane.LaneId)] = Number.isFinite(physical) && physical > 0
+      ? physical
+      : (Number.isFinite(logical) ? logical : 0);
+  });
+
+  const minCut = Number(intervals[0].IrMin);
+  const maxCut = Number(intervals[intervals.length - 1].IrMax);
+  const sigmaRaw = Number(production?.SigmaIr || 0);
+  const sigma = sigmaRaw > 0.0001 ? sigmaRaw : Math.max(0.05, (maxCut - minCut) / 6);
+  const meanRaw = Number(production?.MeanIr || 0);
+  const mu = meanRaw > 0 ? meanRaw : (minCut + maxCut) / 2;
+
+  const xMin = Math.min(minCut, mu - 3.2 * sigma);
+  const xMax = Math.max(maxCut, mu + 3.2 * sigma);
+  const W = 1000;
+  const H = 250;
+  const padL = 14;
+  const padR = 14;
+  const plotTop = 30;
+  const plotBottom = 200;
+  const plotH = plotBottom - plotTop;
+  const xs = (v) => padL + ((v - xMin) / Math.max(0.0001, xMax - xMin)) * (W - padL - padR);
+
+  let bellPath = "";
+  const steps = 120;
+  for (let i = 0; i <= steps; i++) {
+    const x = xMin + ((xMax - xMin) * i) / steps;
+    const g = Math.exp(-0.5 * Math.pow((x - mu) / sigma, 2));
+    bellPath += (i === 0 ? "M" : "L") + xs(x).toFixed(1) + "," + (plotBottom - g * plotH).toFixed(1);
+  }
+
+  const counts = intervals.map((it) => countByLane[String(it.LaneId)] || 0);
+  const maxCount = Math.max(1, ...counts);
+  const totalGood = counts.reduce((a, b) => a + b, 0);
+  const expected = totalGood / Math.max(1, intervals.length);
+  const expectedY = plotBottom - Math.min(1, expected / maxCount) * (plotH * 0.92);
+
+  const slots = intervals.map((it, idx) => {
+    const x1 = xs(Number(it.IrMin));
+    const x2 = xs(Number(it.IrMax));
+    const count = counts[idx];
+    const barH = (count / maxCount) * (plotH * 0.92);
+    const barY = plotBottom - barH;
+    const tint = idx % 2 === 0 ? "rgba(64,118,196,0.15)" : "rgba(64,118,196,0.07)";
+    return `
+      <g>
+        <rect x="${x1.toFixed(1)}" y="${plotTop}" width="${Math.max(1, x2 - x1).toFixed(1)}" height="${plotH}" fill="${tint}" stroke="rgba(64,118,196,0.35)" stroke-width="1">
+          <title>Ligne ${escapeHtml(it.LaneId)} : IR ${formatNumber(it.IrMin, 3)}-${formatNumber(it.IrMax, 3)} mOhm - ${count} cellule(s)</title>
+        </rect>
+        ${count > 0 ? `<rect x="${(x1 + 2).toFixed(1)}" y="${barY.toFixed(1)}" width="${Math.max(2, x2 - x1 - 4).toFixed(1)}" height="${barH.toFixed(1)}" rx="2" fill="rgba(46,160,98,0.55)" stroke="rgba(46,160,98,0.9)" stroke-width="1"></rect>` : ""}
+        <text x="${((x1 + x2) / 2).toFixed(1)}" y="${plotTop - 9}" text-anchor="middle" class="gauss-lane-label">L${escapeHtml(it.LaneId)}</text>
+        <text x="${((x1 + x2) / 2).toFixed(1)}" y="${Math.max(plotTop + 16, barY - 6).toFixed(1)}" text-anchor="middle" class="gauss-count-label">${count}</text>
+      </g>`;
+  }).join("");
+
+  const muX = xs(mu);
+  const svg = `
+    <svg class="gauss-svg" viewBox="0 0 ${W} ${H + 28}" role="img" aria-label="Repartition gaussienne du lot">
+      ${slots}
+      <path d="${bellPath}" fill="none" stroke="rgba(199,84,32,0.95)" stroke-width="2.5"></path>
+      <line x1="${muX.toFixed(1)}" y1="${plotTop}" x2="${muX.toFixed(1)}" y2="${plotBottom}" stroke="rgba(199,84,32,0.75)" stroke-width="1.5" stroke-dasharray="5,4"></line>
+      <line x1="${padL}" y1="${expectedY.toFixed(1)}" x2="${W - padR}" y2="${expectedY.toFixed(1)}" stroke="rgba(90,90,90,0.6)" stroke-width="1" stroke-dasharray="3,5"></line>
+      <line x1="${padL}" y1="${plotBottom}" x2="${W - padR}" y2="${plotBottom}" stroke="rgba(60,60,60,0.6)" stroke-width="1"></line>
+      <text x="${padL}" y="${plotBottom + 20}" class="gauss-axis-label">${formatNumber(xMin, 2)} mOhm</text>
+      <text x="${muX.toFixed(1)}" y="${plotBottom + 20}" text-anchor="middle" class="gauss-axis-label">centre ${formatNumber(mu, 3)} mOhm</text>
+      <text x="${W - padR}" y="${plotBottom + 20}" text-anchor="end" class="gauss-axis-label">${formatNumber(xMax, 2)} mOhm</text>
+      <text x="${W - padR}" y="${plotTop - 9}" text-anchor="end" class="gauss-axis-label">barres = cellules reelles - pointilles = objectif ${formatNumber(expected, 1)}/voie - courbe = modele (sigma ${formatNumber(sigma, 3)})</text>
+    </svg>`;
+
+  return { svg, totalGood };
 }
 
 async function runLotAction(action) {

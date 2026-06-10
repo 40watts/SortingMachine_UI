@@ -1964,3 +1964,27 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+.gauss-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  margin-top: 8px;
+}
+
+.gauss-lane-label {
+  font-size: 14px;
+  fill: #51647a;
+  font-weight: 600;
+}
+
+.gauss-count-label {
+  font-size: 14px;
+  fill: #1d6b3f;
+  font-weight: 700;
+}
+
+.gauss-axis-label {
+  font-size: 12px;
+  fill: #6b7682;
+}
