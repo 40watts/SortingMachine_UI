@@ -21,7 +21,7 @@ Ne pas travailler dans `backend/`, `frontend/` ou `desktop_app/` sauf pour compa
 5. La tension ne choisit pas la ligne; elle sert uniquement de garde sous-charge / surcharge.
 6. Les bornes hautes sont exclusives: `min <= mesure < max`.
 7. Les tensions et resistances negatives sont normalisees en valeur absolue.
-8. Les 9 intervalles IR utilisent des quantiles regularises: assez adaptatifs pour les zones denses, mais sans ligne 1/9 enorme.
+8. Les 9 intervalles IR equilibrent les bacs (~1/9 des cellules par voie): coupures aux quantiles gaussiens robustes (60%) corrigees par les quantiles reels de l'echantillon (30%) et stabilisees par une part reguliere (10%). Les largeurs sont inegales par construction; c'est le comptage qui est egalise.
 9. Le logiciel de tri ignore les etats FULL/capacite en mode intervalles: la machine gere le plein physique.
 10. La voie physique 11/NG est programmee avec la fenetre catch-all constructeur (V 0..99.9, IR 0..999.99). Le PLC evalue les voies dans l'ordre 1..N avec NG en dernier: la voie NG ne vole pas les GOOD.
 11. TriCell Pilot programme les seuils `1188..1370`; le PLC pilote tous les pistons (GOOD et NG) comme dans le logiciel chinois. TriCell Pilot ne pulse aucun piston en production.

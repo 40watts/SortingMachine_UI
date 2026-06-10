@@ -391,8 +391,8 @@ namespace SortingMachineDesktop
         {
             var boundaries = new List<double> { guardMin };
             var span = Math.Max(0.001, guardMax - guardMin);
-            var quantileWeight = profile != null && profile.Count >= MinimumLearningSampleCount ? 0.25 : 0.0;
-            var gaussianWeight = profile != null && profile.Count >= MinimumLearningSampleCount ? 0.10 : 0.0;
+            var quantileWeight = profile != null && profile.Count >= MinimumLearningSampleCount ? 0.30 : 0.0;
+            var gaussianWeight = profile != null && profile.Count >= MinimumLearningSampleCount ? 0.60 : 0.0;
             var equalWidthWeight = Math.Max(0.0, 1.0 - quantileWeight - gaussianWeight);
             var sigma = profile == null ? 0 : Sigma(profile.Values, profile.Median);
             for (var i = 1; i < SortLaneCount; i++)
@@ -403,8 +403,11 @@ namespace SortingMachineDesktop
                 {
                     var quantileBoundary = Percentile(profile.Values, i / (double)SortLaneCount);
                     var gaussianBoundary = profile.Median + sigma * NormalScoreForBoundary(i);
-                    // The lot rule is frozen after 19 cells. With such a small sample, pure quantiles
-                    // are too jumpy; this keeps regular widths while nudging the center like a gaussian.
+                    // Objectif: chaque voie recoit ~1/9 des cellules pour que les bacs se
+                    // remplissent au meme rythme. Coupures aux quantiles gaussiens (robustes
+                    // avec 19 cellules, queues bien extrapolees), corrigees par les quantiles
+                    // reels de l'echantillon (lots non gaussiens) et stabilisees par une petite
+                    // part de decoupage regulier.
                     boundary =
                         equalBoundary * equalWidthWeight +
                         quantileBoundary * quantileWeight +

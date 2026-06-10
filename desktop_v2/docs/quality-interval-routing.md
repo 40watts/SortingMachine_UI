@@ -37,10 +37,13 @@ Le routage physique reprend la logique machine du logiciel chinois: TriCell Pilo
 
 Les 19 mesures de la ligne 10 donnent une plage de garde IR autour du lot. Le logiciel ajoute une reserve adaptative autour du minimum et du maximum observes pour eviter qu'un echantillon d'apprentissage qui manque une queue naturelle du lot transforme trop de cellules en NG. Cette reserve reste bornee par la recette.
 
-Les 8 coupures internes sont des quantiles regularises: elles suivent legerement la distribution reelle de resistance du lot, puis sont surtout ramenees vers un decoupage regulier. Cette regle evite les deux extremes:
+Les 8 coupures internes visent l'equilibrage des bacs: chaque voie GOOD doit recevoir ~1/9 des cellules du lot pour que les bacs operateur se remplissent au meme rythme. Elles sont un melange pondere de trois methodes:
 
-- des intervalles tous identiques mais mal adaptes aux zones denses du lot;
-- une ligne 1 ou une ligne 9 enorme parce qu'elle absorbe toute la marge d'extremite.
+- 60% quantiles gaussiens: centre (mediane) et ecart-type robustes estimes sur les 19 cellules, coupures a `mu + sigma * z(k/9)` — etroites au centre dense, larges aux queues, queues mieux extrapolees que le min/max de l'echantillon;
+- 30% quantiles reels de l'echantillon: si le lot n'est pas gaussien (asymetrique, bimodal), la forme reelle corrige le modele;
+- 10% decoupage regulier: stabilisateur contre le bruit d'un petit echantillon.
+
+Les largeurs d'intervalles sont donc volontairement inegales (c'est le comptage par voie qui est egalise, pas la largeur). La regression `AssertGaussianLotFillsLanesEvenly` verifie qu'un lot gaussien remplit chaque voie entre 5% et 20% (uniforme = 11%).
 
 Les bornes de tension sont construites autour de la moyenne de tension du lot avec une fenetre robuste, plafonnee par la recette.
 

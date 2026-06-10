@@ -30,7 +30,7 @@ namespace SortingMachineDesktop
             AssertEqual("taille echantillon valide", QualityBandRouting.LearningSampleCount, reference.SampleSizeValid);
             AssertEqual("nombre intervalles reference", QualityBandRouting.SortLaneCount, reference.QualityIntervals.Count);
             AssertEqual("nombre intervalles fenetre", QualityBandRouting.SortLaneCount, windows.Intervals.Count);
-            AssertBalancedIntervals("intervalles regularises", windows, 3.0);
+            AssertBalancedIntervals("intervalles gaussiens", windows, 6.0);
 
             AssertBand("borne basse incluse", 1, reference, windows, reference.VoltageMin, windows.Intervals[0].IrMin);
             AssertBand("frontiere interne bascule", 2, reference, windows, MidVoltage(reference), windows.Intervals[0].IrMax);
@@ -46,6 +46,7 @@ namespace SortingMachineDesktop
             AssertRecentLotTailDoesNotBecomeMassNg(recipe);
             AssertStableRoutingIgnoresFullLaneState(recipe, sample, reference);
             AssertLearningRequiresAll19CellsDespiteFullSignal(recipe);
+            AssertGaussianLotFillsLanesEvenly(recipe);
 
             Console.WriteLine("QualityIntervalRoutingRegression OK");
             return 0;
@@ -165,7 +166,7 @@ namespace SortingMachineDesktop
 
             var reference = QualityBandRouting.BuildReference(recipe, sample);
             var windows = QualityBandRouting.BuildWindows(recipe, reference, sample);
-            AssertBalancedIntervals("echantillon irregulier", windows, 3.0);
+            AssertBalancedIntervals("echantillon irregulier", windows, 6.0);
             AssertProductionDistribution("echantillon irregulier production", reference, windows);
         }
 
@@ -196,7 +197,10 @@ namespace SortingMachineDesktop
 
             var reference = QualityBandRouting.BuildReference(recipe, sample);
             var windows = QualityBandRouting.BuildWindows(recipe, reference, sample);
-            AssertBalancedIntervals("lot recent intervalles reguliers", windows, 2.5);
+            // Garde-fou anti-degenerescence seulement: avec des coupures gaussiennes, les voies
+            // de bord absorbent la marge de garde et sont volontairement plus larges. L'equilibre
+            // metier est verifie sur les comptages ci-dessous, pas sur les largeurs.
+            AssertBalancedIntervals("lot recent intervalles reguliers", windows, 12.0);
 
             var productionIr = new[]
             {
@@ -487,6 +491,64 @@ namespace SortingMachineDesktop
         private static bool NearlyEqual(double left, double right)
         {
             return Math.Abs(left - right) < 0.000001;
+        }
+
+        private static void AssertGaussianLotFillsLanesEvenly(IntelligentRecipe recipe)
+        {
+            // Objectif metier: sur un lot gaussien, chaque voie GOOD recoit ~1/9 des cellules
+            // pour que les bacs operateur se remplissent au meme rythme.
+            const double mean = 15.0;
+            const double sigma = 0.8;
+            var zScores = new[]
+            {
+                -1.83, -1.40, -1.13, -0.92, -0.74, -0.59, -0.45, -0.31, -0.18,
+                0.0, 0.18, 0.31, 0.45, 0.59, 0.74, 0.92, 1.13, 1.40, 1.83
+            };
+            var sample = new List<SamplePoint>();
+            for (var i = 0; i < zScores.Length; i++)
+            {
+                sample.Add(new SamplePoint
+                {
+                    Voltage = 3.600 + ((i % 3) - 1) * 0.0002,
+                    Ir = mean + sigma * zScores[i],
+                    Timestamp = "2026-06-10 15:00:" + i.ToString("00")
+                });
+            }
+
+            var reference = QualityBandRouting.BuildReference(recipe, sample);
+            var windows = QualityBandRouting.BuildWindows(recipe, reference, sample);
+
+            var random = new Random(20260610);
+            var counts = new int[QualityBandRouting.SortLaneCount];
+            var routed = 0;
+            var rejected = 0;
+            const int population = 900;
+            for (var i = 0; i < population; i++)
+            {
+                var u1 = 1.0 - random.NextDouble();
+                var u2 = random.NextDouble();
+                var gaussian = Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
+                var ir = mean + sigma * gaussian;
+                string reason;
+                var band = QualityBandRouting.ResolveBand(3.600, ir, reference, windows, out reason);
+                if (band > 0)
+                {
+                    counts[band - 1]++;
+                    routed++;
+                }
+                else
+                {
+                    rejected++;
+                }
+            }
+
+            AssertTrue("lot gaussien: rejets limites (" + rejected + "/" + population + ")", rejected <= population / 10);
+            for (var lane = 0; lane < counts.Length; lane++)
+            {
+                var share = counts[lane] / (double)routed;
+                AssertTrue("lot gaussien: voie " + (lane + 1) + " pas affamee (" + counts[lane] + "/" + routed + ")", share >= 0.05);
+                AssertTrue("lot gaussien: voie " + (lane + 1) + " ne deborde pas (" + counts[lane] + "/" + routed + ")", share <= 0.20);
+            }
         }
 
         private static void AssertBalancedIntervals(string label, QualityBandWindows windows, double maxRatio)
