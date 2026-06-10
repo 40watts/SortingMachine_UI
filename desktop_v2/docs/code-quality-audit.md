@@ -26,7 +26,7 @@ Ce document sert de point d'entree pour un audit technique externe. Il explique 
 - `RoutingLedgerService.cs`: registre FIFO entre decision logicielle, voie appliquee et confirmation physique.
 - `app/web/app.js`: UI operateur, historique audit, affichage graphique des intervalles.
 - `tools/StaticQualityChecks.ps1`: controles statiques anti-regression.
-- `tools/ApiSmokeCheck.ps1`: smoke test API local.
+- `tools/ApiSmokeCheck.ps1`: smoke test API local, reserve a un lancement applicatif autorise.
 - `tools/RepositoryPreflight.ps1`: controle avant Git des secrets et artefacts interdits.
 - `tools/CiQualityChecks.ps1`: build + regressions console + checks statiques, sans demarrer l'application.
 
@@ -49,10 +49,10 @@ Ce document sert de point d'entree pour un audit technique externe. Il explique 
 
 ## Tests reproductibles
 
-Depuis `C:\Users\Administrator\Desktop\SortingMachine_UI`:
+Depuis `C:\Users\Administrator\Desktop\SortingMachine_UI`, pour une passe sans machine:
 
 ```bat
-test_desktop_v2.bat
+test_desktop_v2_no_machine.bat
 ```
 
 Ce script fait:
@@ -60,8 +60,12 @@ Ce script fait:
 - build de `TriCellPilot.exe`;
 - compilation et execution de `RoutingLedgerRegression.exe`;
 - compilation et execution de `QualityIntervalRoutingRegression.exe`.
+- compilation et execution de `PhysicalRoutingApiRegression.exe`;
+- compilation et execution de `NgSweepSimulatorRegression.exe`;
 - controles statiques documentation/UI/termes obsoletes/scripts de lancement;
-- smoke test API sur `/api/state`, `/api/recipes/intelligent`, `/api/cells/audit`, `/api/export/cells-audit-csv` et `/api/contracts`.
+- preflight depot sans secrets/artefacts interdits.
+
+`test_desktop_v2.bat` lance maintenant cette gate sans machine par defaut. Les smoke tests qui peuvent demarrer `TriCellPilot.exe` (`FieldValidationWatcherRegression.ps1` et `ApiSmokeCheck.ps1`) ne s'executent que si `TRICELL_ALLOW_APP_SMOKE=1` est defini explicitement. En atelier, la preuve finale passe par `validate_tricell_field.bat`, le CSV d'observations et `check_tricell_field_result.bat`.
 
 ## Couverture actuelle
 
@@ -77,8 +81,9 @@ Ce script fait:
 - Etats FULL/capacite ignores par la decision 9 intervalles: pas de pause, pas de bascule, pas de NG.
 - Backfill audit d'une cellule GOOD vers son intervalle.
 - Backfill audit d'une cellule NG vers les gardes du lot.
-- Routage physique de production confie a l'automate apres programmation des seuils; les banques I/O directes restent hors production tant qu'elles ne sont pas validees terrain.
-- Interdiction des ecritures de production sur banques piston: le flux normal programme les seuils `1188..1370`, trace `START_PRELOAD`, puis laisse l'automate piloter les sorties physiques.
+- Routage physique de production: avant START, TriCell Pilot programme les seuils `1188..1370` (voies GOOD + voie 11 NG en catch-all constructeur); le PLC pilote tous les pistons, y compris le verin NG.
+- Interdiction des ecritures globales sur banques piston: le flux normal ne remet jamais `28414..28424` / `28926..28936` en bloc et ne pulse aucun piston depuis le PC en production.
+- Verrouillage des anciens chemins directs: les voies GOOD sont bloquees des la planification (`BLOCKED_GOOD_PLC`); le test piston NG maintenance utilise les registres manuels constructeur `28424/28936` machine arretee.
 - Presence des documents humains et IA.
 - Garde-fous Git: `.gitignore`, `.gitattributes`, exemple `.env`, verification absence secrets locaux dans le depot.
 - Scripts de lancement alignes sur l'application active.
@@ -103,4 +108,4 @@ La prochaine tranche de qualite doit extraire de `MachineState.cs`:
 - `CellAuditService` pour historique, CSV et donnees audit;
 - `MachineCounterService` pour synchronisation compteurs machine / lot.
 
-Chaque extraction doit garder `test_desktop_v2.bat` vert avant de passer a la suivante. Aucune nouvelle dette ne doit etre documentee comme acceptee.
+Chaque extraction doit garder `test_desktop_v2_no_machine.bat` vert avant de passer a la suivante. Les smoke tests applicatifs avec `TRICELL_ALLOW_APP_SMOKE=1` restent une validation separee, seulement quand le lancement de l'application locale est autorise. Aucune nouvelle dette ne doit etre documentee comme acceptee.

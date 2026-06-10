@@ -245,6 +245,22 @@ namespace SortingMachineDesktop
             return new[] { high, low };
         }
 
+        public void Close()
+        {
+            try
+            {
+                if (_port != null)
+                {
+                    _port.Close();
+                    _port = null;
+                }
+            }
+            catch
+            {
+                // liberation best-effort: le port doit etre rendu au systeme a la fermeture.
+            }
+        }
+
         private bool EnsurePort(string portName, int baudRate)
         {
             if (string.IsNullOrWhiteSpace(portName))

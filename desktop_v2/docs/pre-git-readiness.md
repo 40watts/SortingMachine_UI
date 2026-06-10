@@ -4,7 +4,7 @@ Date: 2026-05-23
 
 ## Intention produit
 
-TriCell Pilot est l'application Windows active pour piloter et tracer le tri cellule par cellule. L'objectif est un seul poste operateur clair: lot Odoo associe, prechargement des seuils machine, apprentissage ligne 10, audit CSV/UI, puis routage physique confie a l'automate.
+TriCell Pilot est l'application Windows active pour piloter et tracer le tri cellule par cellule. L'objectif est un seul poste operateur clair: lot Odoo associe si disponible, prechargement des seuils machine, apprentissage ligne 10, audit CSV/UI, puis routage physique entierement par seuils PLC: voies GOOD 1..9 et voie 11 NG en fenetre catch-all constructeur.
 
 ## Regles verrouillees
 
@@ -13,7 +13,7 @@ TriCell Pilot est l'application Windows active pour piloter et tracer le tri cel
 - Apres gel: lignes 1 a 9 = 9 intervalles fixes de resistance interne.
 - Tension: garde sous-charge / surcharge seulement, jamais selection de ligne.
 - NG: hors garde tension ou IR, sans chevauchement avec les lignes GOOD.
-- Production: pas d'ecriture directe sur les banques piston; l'application programme les seuils `1188..1370`.
+- Production: l'application programme les seuils `1188..1370` (GOOD + NG catch-all); le PLC pilote tous les pistons, TriCell Pilot n'en pulse aucun.
 - Plein physique: gere par la machine, pas par la decision logicielle.
 
 ## Nettoyage realise
@@ -35,7 +35,7 @@ TriCell Pilot est l'application Windows active pour piloter et tracer le tri cel
 ## Limites restantes
 
 - `git` n'est pas disponible dans le PATH de cette machine; impossible d'initialiser ou d'inspecter le depot Git ici.
-- Le smoke complet `test_desktop_v2.bat` n'a pas ete lance pour eviter de demarrer l'application et de toucher aux ports serie sans validation atelier.
+- La validation sans machine passe par `test_desktop_v2_no_machine.bat` ou par `test_desktop_v2.bat` sans variable d'opt-in: build, regressions simulateur/API locale, controles statiques et preflight, sans demarrer l'application connectee ni toucher aux ports serie. Les smoke tests qui peuvent lancer `TriCellPilot.exe` exigent `TRICELL_ALLOW_APP_SMOKE=1`.
 - `MachineState.cs` et `app/web/app.js` restent de gros fichiers a decouper par tranches verifiees; cette dette n'est pas acceptee comme etat final.
 
 ## Avant premier commit

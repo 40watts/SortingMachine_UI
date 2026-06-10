@@ -263,11 +263,24 @@ function renderDiagnostic() {
   const notes = diag.Notes || [];
   const diffs = diag.ThresholdDifferences || [];
   const rows = state.trace || [];
+  const routing = diag.PhysicalRouting || {};
+  const readiness = diag.StartReadiness || {};
+  const fieldValidation = diag.FieldValidation || {};
+  const lastNgPulse = routing.LastNgPulse || {};
+  const programmedCount = routing.ProgrammedThresholds?.Channels?.length || 0;
+  const observedCount = routing.ObservedThresholds?.Channels?.length || 0;
+  const readinessProblems = readiness.BlockingReasons || [];
+  const readinessWarnings = readiness.Warnings || [];
+  const fieldValidationCard = `<div class="note"><strong>Validation terrain</strong><div class="muted">${fieldValidation.Verified ? "Rapport terrain valide" : "Preuve terrain non validee"} &middot; ${escapeHtml(fieldValidation.Status || "NO_REPORT")} &middot; ${escapeHtml(fieldValidation.ReportTimestamp || "--")}</div><div class="muted">Lot rapport ${escapeHtml(fieldValidation.ReportLotId ?? "--")} &middot; lot courant ${escapeHtml(fieldValidation.CurrentLotId ?? "--")} &middot; ${fieldValidation.MatchesCurrentLot ? "lot conforme" : "lot non confirme"}</div><div class="muted">Trace ${escapeHtml(fieldValidation.TraceVerdict || "UNKNOWN")} &middot; compteurs ${escapeHtml(fieldValidation.CounterVerdict || "UNKNOWN")} &middot; observation ${escapeHtml(fieldValidation.PhysicalObservationVerdict || "UNKNOWN")} &middot; voies ${escapeHtml(fieldValidation.LaneCoverageVerdict || "UNKNOWN")}</div><div class="muted">${escapeHtml(fieldValidation.Summary || "Lancer le controle terrain avant l'essai physique.")}</div><div class="muted">Commandes: ${escapeHtml(fieldValidation.ValidationCommand || "validate_tricell_field.bat 180")} puis refresh_tricell_field_result.bat si CSV complete apres coup, puis ${escapeHtml(fieldValidation.CheckCommand || "check_tricell_field_result.bat")}</div></div>`;
 
   document.getElementById("diagnosticSummary").innerHTML = `
     <div class="stack">
+      ${fieldValidationCard}
       <div class="note"><strong>Handshake</strong><div class="muted">Registre ${formatInt(diag.HandshakeRegister)} • valeur ${escapeHtml(diag.HandshakeValue ?? "--")}</div></div>
       <div class="note"><strong>Status</strong><div class="muted">Registre ${formatInt(diag.StatusRegister)} • valeur ${escapeHtml(diag.StatusValue ?? "--")}</div></div>
+      <div class="note"><strong>Pré-vol DÉMARRER</strong><div class="muted">${readiness.ReadyToStart ? "Prêt à démarrer avec opérateur présent" : "À contrôler avant démarrage"} &middot; statut ${escapeHtml(readiness.MachineStatus ?? "--")} &middot; lot ${escapeHtml(readiness.LotStatus || "--")} &middot; 8230 ${readiness.HandshakeReady ? "lu" : "non lu"} ${escapeHtml(readiness.HandshakeValue ?? "--")}</div><div class="muted">${readinessProblems.length ? escapeHtml(readinessProblems.join(" | ")) : "Aucun blocage logiciel détecté."}</div>${readinessWarnings.length ? `<div class="muted">${escapeHtml(readinessWarnings.join(" | "))}</div>` : ""}</div>
+      <div class="note"><strong>Routage physique</strong><div class="muted">Mode ${escapeHtml(routing.PhysicalRoutingMode || "PLC_THRESHOLDS_NG_CATCHALL")} &middot; attendue ${escapeHtml(routing.ExpectedLane || "--")} &middot; appliquee ${escapeHtml(routing.AppliedLane || "--")} &middot; confirmee ${escapeHtml(routing.ConfirmedLane || "--")}</div><div class="muted">Seuils programmes ${formatInt(programmedCount)} &middot; seuils relus ${formatInt(observedCount)} &middot; ${escapeHtml(routing.ThresholdStatus || diag.ThresholdStatus || "--")}</div></div>
+      <div class="note"><strong>NG production</strong><div class="muted">Vérin NG poussé par le PLC via la voie 11 catch-all à chaque cellule non triée GOOD.</div><div class="muted">Dernier pulse Y11 maintenance: ${escapeHtml(lastNgPulse.Status || "NONE")} &middot; ${escapeHtml(lastNgPulse.Timestamp || "--")}</div></div>
       <div class="note"><strong>Scanner</strong><div class="muted">${escapeHtml(diag.ScannerStatus || "—")} • parité ${escapeHtml(diag.ScannerParity || "—")}</div></div>
       <div class="note"><strong>Compteurs</strong><div class="muted">Source ${escapeHtml(app.Counters?.Source || "--")} • total ${formatInt(app.Counters?.Total)}</div></div>
       <div class="note"><strong>Mesures brutes</strong><div class="muted">${escapeHtml((diag.MeasurementRegisters || []).join(" / "))}</div></div>
@@ -367,26 +380,30 @@ function renderPistonTester() {
   node.innerHTML = `
     <div class="piston-test-head">
       <div class="note">
-        <strong>Diagnostic I/O pistons bloqué</strong>
-        <div class="muted">Les banques directes 28295 / 28414 / 28926 ne sont pas validées pour les lignes GOOD. En production, les vérins sont pilotés par l'automate après programmation des seuils 1188..1370.</div>
+        <strong>Diagnostic I/O pistons</strong>
+        <div class="muted">Test manuel un par un, machine arrêtée. Les resets ne sont pas pulsés.</div>
       </div>
     </div>
     <div class="piston-grid">
       ${PISTON_LANES.map((lane) => {
         const map = getPistonIoMap(lane);
+        const isNg = lane === "NG";
         return `
         <article class="piston-card">
           <strong>${lane === "NG" ? "NG" : `Ligne ${lane}`}</strong>
           <div class="piston-io-map">
             <span>Reset <code>${escapeHtml(map.reset)}</code> non pulsé en test direct</span>
-            <span>Enable <code>${escapeHtml(map.enable)}</code> et sortie <code>${escapeHtml(map.output)}</code> bloqués en réel</span>
+            <span>Enable <code>${escapeHtml(map.enable)}</code> + sortie <code>${escapeHtml(map.output)}</code></span>
             <span>Retour <code>${escapeHtml(map.readback)}</code> / état <code>${escapeHtml(map.state)}</code></span>
           </div>
-          <button class="ghost-button is-disabled" type="button" data-piston-prepare="${escapeHtml(lane)}" data-piston-disabled="true" disabled>Bloqué</button>
+          <div class="button-row">
+            <button class="ghost-button" type="button" data-piston-prepare="${escapeHtml(lane)}">Tester</button>
+            ${isNg ? `<button class="ghost-button" type="button" data-maint-command="DIAG_PULSE_NG">Diag sortie Y11 (carte)</button>` : ""}
+          </div>
         </article>`;
       }).join("")}
     </div>
-    <div class="muted piston-help">Le test direct reste fermé jusqu'à validation terrain voie par voie. Pour vérifier le tri réel, utiliser DÉMARRER: l'app précharge les seuils, puis l'automate route les cellules vers les lignes. Micro-avance tapis et Avancer convoyeur seul restent disponibles sur le coil constructeur 1X 5981, sans signal piston.</div>
+    <div class="muted piston-help">Les tests sont bloqués automatiquement si le cycle est armé ou si une sécurité machine active empêche les vérins.</div>
     <div id="pistonLastStatus" class="muted piston-help"></div>
   `;
 }
@@ -406,11 +423,12 @@ function applyInteractionLocks() {
 
   const maintenanceBusy = !!state.maintenanceCommandInFlight;
   document.querySelectorAll("[data-maint-command]").forEach((button) => {
-    button.disabled = maintenanceBusy;
-    button.classList.toggle("is-disabled", maintenanceBusy);
+    const disabled = maintenanceBusy || !!state.pistonBusyLane;
+    button.disabled = disabled;
+    button.classList.toggle("is-disabled", disabled);
   });
 
-  const pistonLocked = !!state.pistonBusyLane || isPistonCooldownActive();
+  const pistonLocked = !!state.pistonBusyLane || isPistonCooldownActive() || maintenanceBusy;
   document.querySelectorAll("[data-piston-prepare]").forEach((button) => {
     const lane = (button.dataset.pistonPrepare || "").toUpperCase();
     const activeLane = (state.pistonBusyLane || "").toUpperCase();
@@ -707,7 +725,8 @@ async function sendPistonTest(lane, button) {
       result.StateDuring != null ? `pendant ${result.StateDuring}` : null,
       result.StateAfter != null ? `après ${result.StateAfter}` : null
     ].filter(Boolean).join(", ");
-    setPistonStatus(`Dernier essai ${lane === "NG" ? "NG" : `ligne ${lane}`}: ${result.Message || "test direct bloqué en réel"}. Reset ${map.reset}, enable ${map.enable}, sortie ${map.output}, retour ${map.readback}${stateParts ? ` (${stateParts})` : ""}.`);
+    const ioSummary = `Reset ${map.reset}, enable ${map.enable}, sortie ${map.output}, retour ${map.readback}`;
+    setPistonStatus(`Dernier essai ${lane === "NG" ? "NG" : `ligne ${lane}`}: ${result.Message || "test direct terminé"}. ${ioSummary}${stateParts ? ` (${stateParts})` : ""}.`);
   } catch (error) {
     setNotification(error.message, "error", true);
     setPistonStatus(`Dernier essai: erreur - ${error.message}`);

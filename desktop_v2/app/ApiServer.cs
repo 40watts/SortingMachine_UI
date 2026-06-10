@@ -379,6 +379,27 @@ namespace SortingMachineDesktop
                     return;
                 }
 
+                if (path == "/api/diagnostic/physical-routing")
+                {
+                    var diagnostic = _state.GetDiagnostic();
+                    WriteJson(ctx, new { physicalRouting = diagnostic == null ? null : diagnostic.PhysicalRouting });
+                    return;
+                }
+
+                if (path == "/api/diagnostic/start-readiness")
+                {
+                    var diagnostic = _state.GetDiagnostic();
+                    WriteJson(ctx, new { startReadiness = diagnostic == null ? null : diagnostic.StartReadiness });
+                    return;
+                }
+
+                if (path == "/api/diagnostic/field-validation")
+                {
+                    var diagnostic = _state.GetDiagnostic();
+                    WriteJson(ctx, new { fieldValidation = diagnostic == null ? null : diagnostic.FieldValidation });
+                    return;
+                }
+
                 if (path == "/api/alarms")
                 {
                     WriteJson(ctx, new { alarms = _state.GetAlarms() });

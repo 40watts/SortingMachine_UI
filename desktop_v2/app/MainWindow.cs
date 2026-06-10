@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -14,6 +15,7 @@ namespace SortingMachineDesktop
         private readonly MachineState _state;
         private readonly ApiServer _apiServer;
         private readonly DispatcherTimer _tickTimer;
+        private Thread _pollThread;
         private readonly Grid _root;
         private readonly Border _fallbackPanel;
         private readonly TextBlock _fallbackText;
@@ -89,18 +91,35 @@ namespace SortingMachineDesktop
 
         private void OnTick(object sender, EventArgs e)
         {
-            try
+            // Le polling Modbus (ReadFromPlc) se fait sur _pollThread.
+            // Ce timer ne sert plus qu'à démarrer le thread si nécessaire.
+        }
+
+        private void StartPollThread()
+        {
+            _pollThread = new Thread(() =>
             {
-                _state.Tick();
-            }
-            catch
-            {
-                // keep UI alive; diagnostics stay available via snapshot/trace
-            }
+                while (true)
+                {
+                    try
+                    {
+                        _state.Tick();
+                    }
+                    catch
+                    {
+                        // keep polling alive; diagnostics available via trace
+                    }
+                    Thread.Sleep(40);
+                }
+            });
+            _pollThread.IsBackground = true;
+            _pollThread.Name = "PlcPollThread";
+            _pollThread.Start();
         }
 
         private async void OnLoaded(object sender, RoutedEventArgs e)
         {
+            StartPollThread();
             _tickTimer.Start();
 
             try

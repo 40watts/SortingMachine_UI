@@ -29,9 +29,9 @@ La tension ne choisit jamais la ligne. Elle sert uniquement de garde de charge:
 
 ## Filet de securite NG
 
-La voie physique NG reste volontairement hors seuils programmes. Elle ne doit pas recouvrir les lignes GOOD: sur le PLC terrain, une voie NG large peut voler toutes les cellules si la derniere voie qui matche gagne la priorite. Les cellules non captees par les lignes GOOD doivent donc tomber en NG par le rejet machine par defaut, sans seuil NG chevauchant.
+La voie physique NG (slot 11) est programmee avec la fenetre catch-all constructeur: V `0..99.9`, IR `0..999.99`. Le PLC evalue les voies dans l'ordre 1..N avec NG en dernier: une cellule qui matche une voie GOOD part en GOOD, et toute cellule non captee matche la voie 11 et est poussee physiquement par le verin NG, comme sous le logiciel chinois. Si toutes les cellules partent NG, la cause est dans les fenetres GOOD (ex: garde tension trop etroite, incident du 19 mai 2026), pas dans la voie NG. Une voie 11 hors seuils est interdite: les cellules non matchees ne sont plus poussees, filent au dechargement et declenchent l'alarme dechargement (constate du 4 au 8 juin 2026). Le verin NG constructeur correspond aux registres manuels `28424/28936`, reset `28305`, retour `28689`; le bit `10` de `3144` est une sortie carte Y sans lien avec le verin NG.
 
-Le routage physique reste confie a l'automate: TriCell Pilot programme les seuils `1188..1370`, precharge ces seuils avant `DEMARRER`, puis laisse la machine pousser la cellule dans la voie appliquee. Les banques I/O directes des pistons restent bloquees tant qu'elles ne sont pas validees terrain voie par voie.
+Le routage physique reprend la logique machine du logiciel chinois: TriCell Pilot lit d'abord le `8230` courant comme base START, programme les seuils `1188..1370` (voies GOOD + voie 11 catch-all) et les precharge avant `DEMARRER`, puis le PLC pilote tous les pistons selon ces seuils. TriCell Pilot ne pulse aucun piston en production.
 
 ## Construction des intervalles
 

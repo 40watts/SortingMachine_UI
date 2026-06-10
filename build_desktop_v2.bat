@@ -16,6 +16,9 @@ set OUTDIR=%~dp0desktop_v2\bin
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 if not exist "%OUTDIR%\data" mkdir "%OUTDIR%\data"
 
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$target = [System.IO.Path]::GetFullPath('%OUTDIR%\TriCellPilot.exe'); $running = @(); foreach ($p in Get-Process) { if ($p.ProcessName -eq 'TriCellPilot' -or $p.ProcessName -eq 'SortingMachineDesktop') { try { if ($p.Path -and ([System.IO.Path]::GetFullPath($p.Path) -ieq $target)) { $running += $p } } catch {} } }; if ($running.Count -gt 0) { foreach ($p in $running) { Write-Host ('TriCell Pilot est encore ouvert: PID ' + $p.Id + ' depuis ' + $p.StartTime + '. Fermer l''application atelier avant de reconstruire ' + $target + '.'); }; exit 10 }"
+if errorlevel 1 exit /b 1
+
 pushd "%APPDIR%"
   "%CSC%" /nologo /codepage:65001 /target:winexe /platform:x64 /out:"%OUTDIR%\TriCellPilot.exe" /win32icon:"%APPDIR%\app.ico" ^
     /r:%WPF%\WindowsBase.dll ^

@@ -34,27 +34,36 @@ desktop_v2\bin\TriCellPilot.exe
 build_desktop_v2.bat
 ```
 
-## Quality gate complet
+## Quality gate par defaut
 
 ```bat
 test_desktop_v2.bat
 ```
 
-Ce script verifie:
+Ce script lance la gate sans machine ci-dessous et s'arrete par defaut avant tout test qui demarre l'application. Les smoke tests applicatifs sont optionnels:
 
-- compilation de l'application;
-- tests du registre de routage;
-- tests du routage qualite 9 intervalles;
-- controles statiques anti-regression;
-- smoke test API local.
+```bat
+set TRICELL_ALLOW_APP_SMOKE=1
+test_desktop_v2.bat
+```
+
+Avec cet opt-in explicite, le script peut lancer `desktop_v2\bin\TriCellPilot.exe` pour `FieldValidationWatcherRegression` et `ApiSmokeCheck`. Ne pas utiliser cette option pendant une interdiction de test machine.
 
 ## Quality gate CI / sans machine
+
+```bat
+test_desktop_v2_no_machine.bat
+```
+
+Ce script build l'application, execute les regressions console, l'API locale en simulateur, le simulateur NG sweep, les checks statiques et le preflight sans lancer TriCell Pilot connecte et sans envoyer de commande machine.
+
+Le sous-ensemble CI historique reste disponible:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File desktop_v2\tools\CiQualityChecks.ps1 -Root .
 ```
 
-Ce script build l'application, execute les regressions console et les checks statiques sans demarrer l'application locale.
+Ce script build l'application, execute les regressions console principales et les checks statiques sans demarrer l'application locale.
 
 ## Regle metier actuelle
 
@@ -62,8 +71,8 @@ Ce script build l'application, execute les regressions console et les checks sta
 - Lignes 1 a 9: 9 intervalles de resistance interne figes pour le lot.
 - Tension: garde sous-charge / surcharge uniquement.
 - NG: mesure invalide, tension hors garde, resistance hors garde ou incoherence de routage.
-- Commande physique: le routage production reste confie a l'automate via les seuils machine `1188..1370`; TriCell Pilot ne pulse plus directement les pistons GOOD/NG pendant la production.
-- Maintenance tapis: `Micro-avance tapis` et `Avancer convoyeur seul` utilisent uniquement le coil convoyeur constructeur `1X 5981`, sans signal piston.
+- Commande physique: tout le routage production (GOOD et NG) est confie a l'automate via les seuils machine `1188..1370`; TriCell Pilot ne pulse aucun piston en production. La voie physique 11/NG est programmee avec la fenetre catch-all constructeur (V 0..99.9, IR 0..999.99): le PLC pousse et ramene le verin NG sur chaque cellule non captee par une voie GOOD, comme le logiciel chinois. Le verin NG constructeur correspond au slot piston 11 (manuel `28424/28936`, reset `28305`, retour `28689`); le bit `10` de `3144` est une sortie carte Y, pas le verin NG.
+- Maintenance tapis: `Micro-avance tapis` et `Avancer convoyeur` utilisent uniquement le coil convoyeur constructeur `1X 5981`.
 - Ligne pleine/capacite: geree par la machine, ignoree par la decision de tri logiciel.
 - Les bornes hautes sont exclusives: `min <= mesure < max`.
 

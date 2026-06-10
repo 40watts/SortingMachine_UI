@@ -88,6 +88,83 @@ namespace SortingMachineDesktop
                             new ContractField { Name = "Channel", Type = "string", Description = "Ligne cible du moteur actif." },
                             new ContractField { Name = "Result", Type = "string", Description = "GOOD, NG ou PAUSE." }
                         }
+                    },
+                    new ContractDefinition
+                    {
+                        Name = "PhysicalRoutingDiagnostic",
+                        Description = "Diagnostic atelier du routage physique expose par /api/diagnostic/physical-routing.",
+                        Fields = new List<ContractField>
+                        {
+                            new ContractField { Name = "ExpectedLane", Type = "string", Description = "Ligne attendue par le moteur de tri." },
+                            new ContractField { Name = "AppliedLane", Type = "string", Description = "Ligne programmee/appliquee via seuils machine." },
+                            new ContractField { Name = "ConfirmedLane", Type = "string", Description = "Ligne confirmee si le ledger machine la connait." },
+                            new ContractField { Name = "LastHandshake", Type = "int?", Description = "Dernier top 8230 accepte." },
+                            new ContractField { Name = "MachineStatus", Type = "int?", Description = "Statut machine 8231." },
+                            new ContractField { Name = "ThresholdStatus", Type = "string", Description = "Synchronisation seuils programmes vs seuils relus." },
+                            new ContractField { Name = "ProgrammedThresholds", Type = "ThresholdSet", Description = "Seuils 1188..1370 attendus/programmes." },
+                            new ContractField { Name = "ObservedThresholds", Type = "ThresholdSet", Description = "Seuils relus sur PLC si disponibles." },
+                            new ContractField { Name = "AlarmRegisters", Type = "ushort[]", Description = "Registres d'alarmes 22808..22811." },
+                            new ContractField { Name = "LastNgPulse", Type = "NgPulseDiagnostic", Description = "Dernier pulse maintenance de la sortie carte Y11 (diagnostic). En production, le verin NG est pousse par le PLC via la voie 11 catch-all." },
+                            new ContractField { Name = "PhysicalRoutingMode", Type = "string", Description = "Mode physique, PLC_THRESHOLDS_NG_CATCHALL en production." },
+                            new ContractField { Name = "GoodPusherDirectControlBlocked", Type = "bool", Description = "True: les pistons GOOD restent pilotes par le PLC via les seuils, pas par impulsion PC directe." }
+                        }
+                    },
+                    new ContractDefinition
+                    {
+                        Name = "NgPulseDiagnostic",
+                        Description = "Dernier pulse maintenance de la sortie carte Y11 (diagnostic machine arretee). Les champs EnableRegister/OutputRegister restent conserves pour compatibilite; OutputPath, OutputImageRegister et OutputBit decrivent la sortie carte. Ce diagnostic ne concerne pas le verin NG de production, pilote par le PLC via la voie 11 catch-all.",
+                        Fields = new List<ContractField>
+                        {
+                            new ContractField { Name = "Timestamp", Type = "string", Description = "Horodatage local du dernier pulse Y11 maintenance." },
+                            new ContractField { Name = "Handshake", Type = "int?", Description = "Top 8230 associe au pulse si connu." },
+                            new ContractField { Name = "Status", Type = "string", Description = "NONE, ATTEMPT, SIMULATED, SENT ou ERROR." },
+                            new ContractField { Name = "OutputPath", Type = "string", Description = "Chemin sortie carte, Y11_4X_3144_BIT_10." },
+                            new ContractField { Name = "OutputImageRegister", Type = "int", Description = "Holding image sortie Y, attendu 3144." },
+                            new ContractField { Name = "OutputBit", Type = "int", Description = "Bit Y11 dans l'image 3144, attendu 10." },
+                            new ContractField { Name = "Result", Type = "string", Description = "Resultat operateur du dernier pulse Y11 maintenance." },
+                            new ContractField { Name = "Detail", Type = "string", Description = "Detail trace, incluant Y11 ON/OFF." }
+                        }
+                    },
+                    new ContractDefinition
+                    {
+                        Name = "StartReadinessDiagnostic",
+                        Description = "Pre-vol operateur expose par /api/diagnostic/start-readiness avant DÉMARRER.",
+                        Fields = new List<ContractField>
+                        {
+                            new ContractField { Name = "ReadyToStart", Type = "bool", Description = "Aucun blocage logiciel detecte; l'operateur doit rester present." },
+                            new ContractField { Name = "Connected", Type = "bool", Description = "Lecture PLC disponible." },
+                            new ContractField { Name = "HandshakeReady", Type = "bool", Description = "True si le top 8230 courant est connu avant START." },
+                            new ContractField { Name = "HandshakeRegister", Type = "int", Description = "Registre top cycle, attendu 8230." },
+                            new ContractField { Name = "HandshakeValue", Type = "int?", Description = "Derniere valeur 8230 lue dans le diagnostic." },
+                            new ContractField { Name = "HandshakeChangedAt", Type = "string", Description = "Horodatage du dernier changement 8230 connu." },
+                            new ContractField { Name = "LotAssociated", Type = "bool", Description = "Lot Odoo verifie associe." },
+                            new ContractField { Name = "ModelStable", Type = "bool", Description = "Modele 19 cellules stable." },
+                            new ContractField { Name = "ThresholdsSynchronized", Type = "bool", Description = "Seuils programmes et relus synchronises." },
+                            new ContractField { Name = "MachineRequiresReset", Type = "bool", Description = "Statut machine 7 detecte." },
+                            new ContractField { Name = "BlockingReasons", Type = "string[]", Description = "Raisons bloquantes avant START." },
+                            new ContractField { Name = "Warnings", Type = "string[]", Description = "Avertissements non bloquants." },
+                            new ContractField { Name = "OperatorChecks", Type = "string[]", Description = "Points de controle terrain avant essai physique." }
+                        }
+                    },
+                    new ContractDefinition
+                    {
+                        Name = "FieldValidationDiagnostic",
+                        Description = "Etat du dernier rapport terrain expose par /api/diagnostic/field-validation.",
+                        Fields = new List<ContractField>
+                        {
+                            new ContractField { Name = "HasReport", Type = "bool", Description = "Un rapport field_validation operateur existe hors smoke Codex." },
+                            new ContractField { Name = "Verified", Type = "bool", Description = "Trace, compteurs, observation, couverture voies GOOD et lot courant sont OK avec conclusion complete." },
+                            new ContractField { Name = "Status", Type = "string", Description = "NO_REPORT, INCOMPLETE, COMPLETE ou ERROR." },
+                            new ContractField { Name = "ReportLotId", Type = "int?", Description = "Lot lu dans le rapport terrain." },
+                            new ContractField { Name = "CurrentLotId", Type = "int?", Description = "Lot actif courant au moment du diagnostic." },
+                            new ContractField { Name = "MatchesCurrentLot", Type = "bool", Description = "Le rapport terrain concerne le lot courant." },
+                            new ContractField { Name = "TraceVerdict", Type = "string", Description = "Verdict trace logiciel du rapport." },
+                            new ContractField { Name = "CounterVerdict", Type = "string", Description = "Verdict compteurs machine du rapport." },
+                            new ContractField { Name = "PhysicalObservationVerdict", Type = "string", Description = "Verdict observation physique operateur du rapport." },
+                            new ContractField { Name = "LaneCoverageVerdict", Type = "string", Description = "Verdict couverture terrain des lignes GOOD 1..9." },
+                            new ContractField { Name = "ValidationCommand", Type = "string", Description = "Commande de lancement surveillance terrain." },
+                            new ContractField { Name = "CheckCommand", Type = "string", Description = "Commande de verification rapport terrain." }
+                        }
                     }
                 },
                 Constraints = new List<string>
@@ -101,7 +178,7 @@ namespace SortingMachineDesktop
                 {
                     "Mode intelligent GOOD / NG actif par défaut.",
                     "COM1 / 19200 / esclave 1 pour l’automate.",
-                    "Registre 8230 pour le handshake et 8408 pour les mesures.",
+                    "Registre 8230 pour le handshake et 8408 pour le paquet mesures IR/tension.",
                     "Scanner COM2 / 115200 / parité Even par défaut."
                 }
             };

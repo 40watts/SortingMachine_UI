@@ -5,6 +5,10 @@ namespace SortingMachineDesktop
 {
     public class MachineConfig
     {
+        public const int DefaultMeasurementRegister = 8408;
+        public const int LiveDisplayMeasurementRegister = 8402;
+        public const int KnownErroneousMeasurementRegister = 8402;
+
         public int Channels { get; set; }
         public string ComPort { get; set; }
         public int BaudRate { get; set; }
@@ -40,7 +44,7 @@ namespace SortingMachineDesktop
                 ComPort = "COM1",
                 BaudRate = 19200,
                 SlaveId = 1,
-                MeasurementRegister = 8408,
+                MeasurementRegister = DefaultMeasurementRegister,
                 AlarmRegister = 22808,
                 HandshakeRegister = 8230,
                 StatusRegister = 8231,
@@ -533,6 +537,85 @@ namespace SortingMachineDesktop
         public double ObservedValue { get; set; }
     }
 
+    public class NgPulseDiagnostic
+    {
+        public string Timestamp { get; set; }
+        public int? Handshake { get; set; }
+        public string Status { get; set; }
+        public string OutputPath { get; set; }
+        public int OutputImageRegister { get; set; }
+        public int OutputBit { get; set; }
+        public int EnableRegister { get; set; }
+        public int OutputRegister { get; set; }
+        public int EnableValue { get; set; }
+        public int OutputValue { get; set; }
+        public string Result { get; set; }
+        public string Source { get; set; }
+        public string Detail { get; set; }
+    }
+
+    public class PhysicalRoutingDiagnostic
+    {
+        public string ExpectedLane { get; set; }
+        public string AppliedLane { get; set; }
+        public string ConfirmedLane { get; set; }
+        public int HandshakeRegister { get; set; }
+        public int? LastHandshake { get; set; }
+        public int StatusRegister { get; set; }
+        public int? MachineStatus { get; set; }
+        public string ThresholdStatus { get; set; }
+        public ThresholdSet ProgrammedThresholds { get; set; }
+        public ThresholdSet ObservedThresholds { get; set; }
+        public List<ushort> AlarmRegisters { get; set; }
+        public string AlarmSummary { get; set; }
+        public NgPulseDiagnostic LastNgPulse { get; set; }
+        public string PhysicalRoutingMode { get; set; }
+        public bool GoodPusherDirectControlBlocked { get; set; }
+    }
+
+    public class StartReadinessDiagnostic
+    {
+        public bool ReadyToStart { get; set; }
+        public bool Connected { get; set; }
+        public bool HandshakeReady { get; set; }
+        public int HandshakeRegister { get; set; }
+        public int? HandshakeValue { get; set; }
+        public string HandshakeChangedAt { get; set; }
+        public bool LotAssociated { get; set; }
+        public bool ModelStable { get; set; }
+        public bool ThresholdsSynchronized { get; set; }
+        public bool MachineRequiresReset { get; set; }
+        public bool BlockingAlarmActive { get; set; }
+        public bool OperatorConfirmationRequired { get; set; }
+        public int? MachineStatus { get; set; }
+        public string LotStatus { get; set; }
+        public string ExpectedLane { get; set; }
+        public string AppliedLane { get; set; }
+        public List<string> BlockingReasons { get; set; }
+        public List<string> Warnings { get; set; }
+        public List<string> OperatorChecks { get; set; }
+    }
+
+    public class FieldValidationDiagnostic
+    {
+        public bool HasReport { get; set; }
+        public bool Verified { get; set; }
+        public string Status { get; set; }
+        public string ReportPath { get; set; }
+        public string ReportTimestamp { get; set; }
+        public int? ReportLotId { get; set; }
+        public int? CurrentLotId { get; set; }
+        public bool MatchesCurrentLot { get; set; }
+        public string TraceVerdict { get; set; }
+        public string CounterVerdict { get; set; }
+        public string PhysicalObservationVerdict { get; set; }
+        public string LaneCoverageVerdict { get; set; }
+        public string Summary { get; set; }
+        public string ValidationCommand { get; set; }
+        public string CheckCommand { get; set; }
+        public List<string> MissingReasons { get; set; }
+    }
+
     public class DiagnosticSnapshot
     {
         public string SourceMode { get; set; }
@@ -551,6 +634,9 @@ namespace SortingMachineDesktop
         public bool ThresholdsObserved { get; set; }
         public string ThresholdStatus { get; set; }
         public List<ThresholdDifference> ThresholdDifferences { get; set; }
+        public PhysicalRoutingDiagnostic PhysicalRouting { get; set; }
+        public StartReadinessDiagnostic StartReadiness { get; set; }
+        public FieldValidationDiagnostic FieldValidation { get; set; }
         public int ObservationEventCount { get; set; }
         public List<string> Notes { get; set; }
     }
@@ -632,5 +718,7 @@ namespace SortingMachineDesktop
         public const string LegacyNoMatch = "LEGACY_NO_MATCH";
         public const string AppliedRoutingNg = "ROUTAGE_MACHINE_NG";
         public const string PhysicalCounterNg = "COMPTEUR_MACHINE_NG";
+        public const string ScannerNoBarcodeNg = "SCANNER_NO_BARCODE_NG";
+        public const string ScannerNoBarcodeCon = "SCANNER_NO_BARCODE_CON";
     }
 }

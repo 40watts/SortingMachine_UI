@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -28,30 +28,6 @@ namespace SortingMachineDesktop
             public bool Full { get; set; }
         }
 
-        private class ScheduledPusherWork
-        {
-            public long Sequence { get; set; }
-            public MachineConfig Config { get; set; }
-            public string LaneId { get; set; }
-            public int? HandshakeValue { get; set; }
-            public string Source { get; set; }
-            public string Reason { get; set; }
-            public bool RunNgSafetyAfter { get; set; }
-            public int DelayMs { get; set; }
-            public int Generation { get; set; }
-        }
-
-        private class ScheduledNgSweepWork
-        {
-            public long Sequence { get; set; }
-            public MachineConfig Config { get; set; }
-            public int HandshakeValue { get; set; }
-            public string Source { get; set; }
-            public string Reason { get; set; }
-            public int DelayMs { get; set; }
-            public int Generation { get; set; }
-        }
-
         private class NgPusherReleaseResult
         {
             public bool CommandReleased { get; set; }
@@ -79,12 +55,15 @@ namespace SortingMachineDesktop
         private const int LiveVoltageRegister = 8404;
         private const int CycleCommandRegister = 5978;
         private const int SpeedModeRegister = 23341;
+        private const ushort MachineSwitchesRegister = 640;
         private const ushort StartCycleCode = 31;
         private const ushort StopCycleCode = 29;
         private const ushort PauseCycleCode = 32;
         private const ushort ResetCycleCode = 26;
         private const ushort SaveChannelCode = 59;
+        private const ushort ConnectInitCode = 57;
         private const int ResetRequiredStatusCode = 7;
+        private const int RunningStatusCode = 1;
         private const ushort PusherResetCommandBaseRegister = 28295;
         private const ushort PusherCylinderStateBaseRegister = 28158;
         private const ushort PusherCylinderEnableBaseRegister = 28414;
@@ -93,17 +72,20 @@ namespace SortingMachineDesktop
         private const ushort PusherActiveValue = 1;
         private const ushort PusherInactiveValue = 0;
         private const ushort PusherResetReleasedValue = 1;
-        private const int PusherDecisionDelayMs = 650;
-        private const int PusherNgSafetyAfterDecisionMs = 120;
         private const int PusherPreReleaseSettleMs = 90;
         private const int PusherEnableSettleMs = 80;
-        private const int PusherPulseMs = 300;
+        private const int PusherPulseMs = 1000;
+        private const int MaintenancePusherPulseMs = 1000;
+        private const int NgPusherDiagnosticPulseMs = 1500;
         private const int NgPusherReleaseCheckIntervalMs = 2000;
-        private const int CycleCommandPulseMs = 120;
         private const ushort ConveyorForwardRegister = 5981;
         private const ushort ConveyorForwardCode = 1;
-        private const int ConveyorForwardPulseMs = 160;
-        private const int ConveyorFineForwardPulseMs = 25;
+        private const int ConveyorForwardPulseMs = 1000;
+        private const int ConveyorFineForwardPulseMs = 200;
+        private const ushort Y11OutputImageRegister = 3144;
+        private const int Y11OutputImageBit = 10;
+        private const ushort Y11OutputImageMask = 0x0400;
+        private const ushort Y11OutputImageClearMask = 0xFBFF;
 
         private readonly object _lock = new object();
         private readonly ConfigStore _configStore;
@@ -116,10 +98,10 @@ namespace SortingMachineDesktop
         private readonly ScannerClient _scanner;
         private readonly LegacySortingEngine _legacyEngine;
         private readonly IntelligentSortingEngine _intelligentEngine;
-        private long _nextPusherWorkId;
         private int _pusherWorkGeneration;
         private bool _operatorStartArmed;
         private DateTime _lastNgPusherReleaseCheck = DateTime.MinValue;
+        private DateTime _lastNgAutoReleaseSkippedTrace = DateTime.MinValue;
         private const int CounterBaseRegister = 900;
         private const int TotalCounterRegister = 948;
         private const int NgCounterIndex = 10;
@@ -153,6 +135,11 @@ namespace SortingMachineDesktop
         private DateTime _lastThresholdRead;
         private DateTime _lastCounterRead;
         private DateTime _lastSpeedRead;
+        private DateTime _lastSwitchesRead;
+        private int? _machineSwitchesValue;
+        private bool _constructorConnectInitSent;
+        private DateTime _lastEnablesRead;
+        private ushort[] _pusherEnablesSnapshot;
         private DateTime _lastAlarmRead;
         private ushort[] _lastAlarmRegisters;
         private int? _lastHandshakeValue;
@@ -168,6 +155,7 @@ namespace SortingMachineDesktop
         private string _lastThresholdControlSignature;
         private bool _forceThresholdSync;
         private string _programmedRoutingLaneId;
+        private NgPulseDiagnostic _lastNgPulseDiagnostic;
         private bool? _pendingSwapWordsCandidate;
         private int _pendingSwapWordsConfirmations;
         private DateTime _suspendThresholdSyncUntil;
@@ -211,6 +199,7 @@ namespace SortingMachineDesktop
             _lastThresholdRead = DateTime.MinValue;
             _lastCounterRead = DateTime.MinValue;
             _lastSpeedRead = DateTime.MinValue;
+            _lastSwitchesRead = DateTime.MinValue;
             _lastAlarmRead = DateTime.MinValue;
             _lastAlarmRegisters = new ushort[0];
             _lotControlEnabled = false;
@@ -223,6 +212,7 @@ namespace SortingMachineDesktop
             _lastThresholdControlSignature = null;
             _forceThresholdSync = true;
             _programmedRoutingLaneId = null;
+            _lastNgPulseDiagnostic = CreateEmptyNgPulseDiagnostic();
             _suspendThresholdSyncUntil = DateTime.MinValue;
             _lastLaneFullSignalState = false;
             _lastSafetyStopSentAt = DateTime.MinValue;
@@ -253,7 +243,7 @@ namespace SortingMachineDesktop
                 "LOCAL",
                 string.Empty,
                 string.Empty,
-                "Les commandes cycle 5978 et la programmation des seuils 1188..1370 restent bloquées tant qu’aucun lot de cellules Odoo suivi n’est associé."
+                "Les commandes cycle 5978 et la programmation des seuils 1188..1370 peuvent fonctionner avec un lot local; sans lot Odoo associé, la traçabilité reste locale."
             );
         }
 
@@ -466,10 +456,10 @@ namespace SortingMachineDesktop
                     return result;
                 }
 
-                if (result.Command == "START" || result.Command == "RESET")
+                if (result.Command == "START")
                 {
                     var ngRelease = ReleaseNgPusherResetNoLock(_config, "CYCLE_" + result.Command, "UI", true);
-                    if (result.Command == "START" && !ngRelease.CommandReleased)
+                    if (!ngRelease.CommandReleased)
                     {
                         result.BlockedBySafety = true;
                         result.Message = "DÉMARRER bloqué : impossible de libérer la commande reset du vérin NG (28305=1). " + ngRelease.Message;
@@ -495,12 +485,28 @@ namespace SortingMachineDesktop
                         return result;
                     }
 
+                    string handshakeGateMessage;
+                    if (!TryPrimeHandshakeGateBeforeStartNoLock(_config, out handshakeGateMessage))
+                    {
+                        result.BlockedBySafety = true;
+                        result.Message = handshakeGateMessage;
+                        _trace.Append("COMMAND", "START", "BLOCKED", "PLC", _config.HandshakeRegister.ToString(CultureInfo.InvariantCulture), string.Empty, result.Message);
+                        return result;
+                    }
+
                     if (!TryPreloadThresholdsBeforeStartNoLock(_config, activeLot))
                     {
                         result.Message = "DÉMARRER bloqué : échec de programmation des seuils machine avant START.";
                         _trace.Append("COMMAND", "START", "BLOCKED", "LOCAL", "1188..1370", string.Empty, result.Message);
                         return result;
                     }
+
+                    ArmPusherStationsNoLock(_config, "START");
+                }
+
+                if (result.Command == "RESET")
+                {
+                    EnsureStoppedBeforeResetNoLock(_config);
                 }
 
                 var success = SendCycleCommandNoLock(_config, code, result.Command);
@@ -516,8 +522,8 @@ namespace SortingMachineDesktop
                 ApplyCycleCommandNoLock(result.Command);
                 result.Ok = true;
                 result.Message = result.Command == "RESET"
-                    ? "Réarmement automate envoyé au registre 5978=26 puis relâché à 0. Relancer DÉMARRER si le statut est revenu prêt."
-                    : "Commande " + result.Command + " envoyée au registre 5978 puis relâchée à 0.";
+                    ? "Réarmement automate envoyé au registre 5978=26. Relancer DÉMARRER si le statut est revenu prêt."
+                    : "Commande " + result.Command + " envoyée au registre 5978.";
                 _trace.Append("COMMAND", result.Command, "SENT", "UI", "5978", code.ToString(CultureInfo.InvariantCulture), result.Message);
                 return result;
             }
@@ -1869,7 +1875,9 @@ namespace SortingMachineDesktop
                 Status = string.IsNullOrWhiteSpace(ticket.Status) ? RoutingTicketStatuses.Pending : ticket.Status,
                 ConfirmedAt = ticket.ConfirmedAt,
                 Mismatch = mismatch,
-                Result = IsGoodRoutingChannelNoLock(effectiveLane) ? "GOOD" : "NG",
+                Result = string.Equals(decision, "CON", StringComparison.OrdinalIgnoreCase)
+                    ? "CON"
+                    : IsGoodRoutingChannelNoLock(effectiveLane) ? "GOOD" : "NG",
                 RejectReason = ticket.RejectReason,
                 ThresholdSource = ticket.ThresholdSource,
                 DataQuality = dataQuality
@@ -2229,21 +2237,22 @@ namespace SortingMachineDesktop
                             Ok = true,
                             Command = normalized,
                             Message = "Simulateur actif : démarrage constructeur brut tracé seulement.",
-                            RequiresExpert = false,
-                            TerrainValidated = true,
+                            RequiresExpert = true,
+                            TerrainValidated = false,
                             Simulated = true
                         };
                     }
 
-                    var rawStartOk = SendCycleCommandNoLock(_config, StartCycleCode, normalized);
-                    _trace.Append("MAINTENANCE", normalized, rawStartOk ? "SENT" : "ERROR", "UI", "5978", StartCycleCode.ToString(CultureInfo.InvariantCulture), rawStartOk ? "Commande constructeur brute envoyée." : "Échec écriture constructeur brute 5978=31.");
+                    var rawStartMessage = "Démarrage brut constructeur bloqué en réel : utiliser DÉMARRER standard pour lire 8230, précharger 1188..1370, puis envoyer 5978=31.";
+                    _trace.Append("MAINTENANCE", normalized, "BLOCKED", "LOCAL", "5978", StartCycleCode.ToString(CultureInfo.InvariantCulture), rawStartMessage);
                     return new MaintenanceCommandResult
                     {
-                        Ok = rawStartOk,
+                        Ok = false,
                         Command = normalized,
-                        Message = rawStartOk ? "Démarrage constructeur brut envoyé : 5978=31 uniquement." : "Échec d’envoi du démarrage constructeur brut.",
-                        RequiresExpert = false,
-                        TerrainValidated = true,
+                        Message = rawStartMessage,
+                        RequiresExpert = true,
+                        BlockedBySafety = true,
+                        TerrainValidated = false,
                         Simulated = false
                     };
                 }
@@ -2267,6 +2276,37 @@ namespace SortingMachineDesktop
                     return ExecuteNgPusherReleaseNoLock(normalized);
                 }
 
+                if (normalized == "PUSHER_STATIONS_ENABLE")
+                {
+                    return ExecutePusherStationsEnableNoLock(normalized);
+                }
+
+                if (normalized == "NG_STATION_ENABLE")
+                {
+                    return ExecuteNgStationEnableNoLock(normalized, true);
+                }
+
+                if (normalized == "NG_STATION_DISABLE")
+                {
+                    return ExecuteNgStationEnableNoLock(normalized, false);
+                }
+
+                if (normalized == "DIAG_PULSE_NG" || normalized == "PULSE_NG_DIAGNOSTIC")
+                {
+                    return ExecuteNgPusherDiagnosticPulseNoLock(normalized);
+                }
+
+                if (normalized == "Y11_OUTPUT_OFF" || normalized == "Y11_OFF" || normalized == "DIAG_Y11_OFF")
+                {
+                    return ExecuteY11OutputBitNoLock(normalized, false);
+                }
+
+                if (normalized == "Y11_OUTPUT_ON" || normalized == "Y11_ON" || normalized == "DIAG_Y11_ON")
+                {
+                    return ExecuteY11OutputBitNoLock(normalized, true);
+                }
+
+
                 if (normalized == "RESTORE_PISTONS_AUTO")
                 {
                     _trace.Append("MAINTENANCE", normalized, "BLOCKED", "LOCAL", "28414..28424/28926..28936", string.Empty, "Commande supprimée : TriCell Pilot ne force plus les sorties piston à 0 ou à 1.");
@@ -2286,7 +2326,7 @@ namespace SortingMachineDesktop
                     return ExecuteConveyorOnlyForwardNoLock(
                         normalized,
                         ConveyorFineForwardPulseMs,
-                        "Micro-ajustement tapis : impulsion courte du coil convoyeur constructeur, aucune écriture piston.");
+                        "Micro-ajustement tapis : impulsion courte du coil convoyeur constructeur.");
                 }
 
                 if (normalized == "CONVEYOR_ONLY_FORWARD" || normalized == "FORWARD")
@@ -2294,93 +2334,174 @@ namespace SortingMachineDesktop
                     return ExecuteConveyorOnlyForwardNoLock(
                         normalized,
                         ConveyorForwardPulseMs,
-                        "Dégagement convoyeur seul : impulsion coil convoyeur constructeur uniquement, aucune écriture piston.");
+                        "Dégagement convoyeur : impulsion du coil convoyeur constructeur.");
                 }
 
                 if (normalized == "BACKWARD" || normalized == "STEP" || normalized == "CLEAN" || normalized == "MANUAL_TEST")
                 {
-                    _trace.Append("MAINTENANCE", normalized, "BLOCKED", "LOCAL", string.Empty, string.Empty, "Commande brute désactivée : utiliser uniquement Avancer convoyeur seul, sans aucune écriture piston.");
+                    _trace.Append("MAINTENANCE", normalized, "BLOCKED", "LOCAL", string.Empty, string.Empty, "Commande brute désactivée : utiliser uniquement Avancer convoyeur.");
                     return new MaintenanceCommandResult
                     {
                         Ok = false,
                         Command = normalized,
-                        Message = "Commande brute désactivée. Utiliser Avancer convoyeur seul : aucun signal piston n'est envoyé.",
+                        Message = "Commande brute désactivée. Utiliser Avancer convoyeur (coil constructeur 1X 5981).",
                         RequiresExpert = false,
                         TerrainValidated = false,
                         Simulated = _config.UseSimulator
                     };
                 }
 
-                ushort register;
-                ushort code;
-                string detail;
-                switch (normalized)
-                {
-                    case "FORWARD":
-                        register = 5981;
-                        code = 1;
-                        detail = "Commande manuelle inférée : avance";
-                        break;
-                    case "BACKWARD":
-                        register = 5982;
-                        code = 1;
-                        detail = "Commande manuelle inférée : recul";
-                        break;
-                    case "STEP":
-                        register = 7099;
-                        code = 6;
-                        detail = "Commande manuelle inférée : pas à pas";
-                        break;
-                    case "CLEAN":
-                        register = 7099;
-                        code = 13;
-                        detail = "Commande manuelle inférée : nettoyage";
-                        break;
-                    case "MANUAL_TEST":
-                        register = 7099;
-                        code = 34;
-                        detail = "Commande manuelle inférée : test manuel";
-                        break;
-                    default:
-                        return new MaintenanceCommandResult
-                        {
-                            Ok = false,
-                            Command = normalized,
-                            Message = "Commande maintenance inconnue.",
-                            RequiresExpert = false,
-                            TerrainValidated = false,
-                            Simulated = _config.UseSimulator
-                        };
-                }
-
-                _trace.Append("MAINTENANCE", normalized, "ATTEMPT", _config.UseSimulator ? "SIMULATEUR" : "UI", register.ToString(CultureInfo.InvariantCulture), code.ToString(CultureInfo.InvariantCulture), detail + " / NON VALIDÉ TERRAIN");
-
-                if (_config.UseSimulator)
-                {
-                    return new MaintenanceCommandResult
-                    {
-                        Ok = true,
-                        Command = normalized,
-                        Message = "Simulateur actif : commande maintenance tracée seulement.",
-                        RequiresExpert = false,
-                        TerrainValidated = false,
-                        Simulated = true
-                    };
-                }
-
-                var ok = SendHoldingPulseNoLock(_config, register, code, normalized);
-                _trace.Append("MAINTENANCE", normalized, ok ? "SENT" : "ERROR", "UI", register.ToString(CultureInfo.InvariantCulture), code.ToString(CultureInfo.InvariantCulture), detail + " / NON VALIDÉ TERRAIN");
-
                 return new MaintenanceCommandResult
                 {
-                    Ok = ok,
+                    Ok = false,
                     Command = normalized,
-                    Message = ok ? "Commande maintenance envoyée." : "Échec d’envoi de la commande maintenance.",
+                    Message = "Commande maintenance inconnue.",
                     RequiresExpert = false,
                     TerrainValidated = false,
-                    Simulated = false
+                    Simulated = _config.UseSimulator
                 };
             }
+        }
+
+        private MaintenanceCommandResult ExecutePusherStationsEnableNoLock(string commandName)
+        {
+            // Etat production constructeur: chaque station piston a un enable (28414+i) qui doit
+            // etre a 1 pour que le PLC puisse tirer le piston. Les nettoyages logiciels de mai
+            // les ont remis a 0 (constate par lecture directe le 10 juin 2026: seules les voies
+            // armees tirent). On arme les enables 1..10 + NG, un par un, sans toucher les sorties.
+            if (_config.UseSimulator)
+            {
+                _trace.Append("MAINTENANCE", commandName, "SIMULATED", "SIMULATEUR", "28414..28424", "1", "Simulateur actif : armement stations pistons tracé seulement.");
+                return new MaintenanceCommandResult
+                {
+                    Ok = true,
+                    Command = commandName,
+                    Message = "Simulateur actif : armement stations pistons tracé seulement.",
+                    RequiresExpert = false,
+                    TerrainValidated = false,
+                    Simulated = true,
+                    Mode = "PUSHER_STATIONS_ENABLE",
+                    Register = "28414..28424",
+                    Value = "1"
+                };
+            }
+
+            if (IsPistonMaintenanceBlockedByRunStateNoLock())
+            {
+                var runBlock = "Armement stations pistons bloqué pendant le cycle. Envoyer STOP ou PAUSE d'abord.";
+                _trace.Append("MAINTENANCE", commandName, "BLOCKED_RUN", "LOCAL", "28414..28424", string.Empty, runBlock);
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = runBlock,
+                    RequiresExpert = false,
+                    BlockedBySafety = true,
+                    TerrainValidated = false,
+                    Simulated = false,
+                    Mode = "PUSHER_STATIONS_ENABLE",
+                    Register = "28414..28424"
+                };
+            }
+
+            var armed = new List<string>();
+            var failed = new List<string>();
+            for (var index = 0; index <= NgCounterIndex; index++)
+            {
+                var enableRegister = (ushort)(PusherCylinderEnableBaseRegister + index);
+                var laneLabel = index == NgCounterIndex ? "NG" : (index + 1).ToString(CultureInfo.InvariantCulture);
+                var writeOk = WritePistonIoMaintenanceSingleNoLock(_config, enableRegister, PusherActiveValue);
+                Thread.Sleep(60);
+                ushort after;
+                var hasAfter = TryReadHoldingSingleNoLock(_config, enableRegister, out after);
+                if (writeOk && hasAfter && after != 0)
+                {
+                    armed.Add(laneLabel);
+                }
+                else
+                {
+                    failed.Add(laneLabel + "(" + (hasAfter ? after.ToString(CultureInfo.InvariantCulture) : "?") + ")");
+                }
+            }
+
+            var ok = failed.Count == 0;
+            var detail = "Stations armées (enable=1, maintenu, sorties jamais écrites): " +
+                         (armed.Count > 0 ? string.Join(",", armed.ToArray()) : "aucune") +
+                         (failed.Count > 0 ? " ; échecs: " + string.Join(",", failed.ToArray()) : "") + ".";
+            _trace.Append("MAINTENANCE", commandName, ok ? "SENT" : "ERROR", "UI", "28414..28424", "1", detail);
+
+            return new MaintenanceCommandResult
+            {
+                Ok = ok,
+                Command = commandName,
+                Message = ok
+                    ? "Toutes les stations pistons sont armées (lignes 1..10 + NG). Lancer RÉARMER puis DÉMARRER : les pistons peuvent maintenant tirer selon les seuils."
+                    : "Armement incomplet. " + detail,
+                RequiresExpert = false,
+                TerrainValidated = false,
+                Simulated = false,
+                Mode = "PUSHER_STATIONS_ENABLE",
+                Register = "28414..28424",
+                Value = "1",
+                StateAfter = detail
+            };
+        }
+
+        private MaintenanceCommandResult ExecuteNgStationEnableNoLock(string commandName, bool enable)
+        {
+            // Hypothese constructeur: l'enable 28424 (ligne NG de la page I/O chinoise) arme la
+            // station NG pour que le PLC batte le poussoir a chaque avance, meme a vide.
+            // On ecrit UNIQUEMENT l'enable, jamais la sortie 28936, et on le LAISSE en place.
+            var targetLabel = enable ? "1" : "0";
+            if (_config.UseSimulator)
+            {
+                _trace.Append("MAINTENANCE", commandName, "SIMULATED", "SIMULATEUR", NgPusherEnableRegister.ToString(CultureInfo.InvariantCulture), targetLabel, "Simulateur actif : enable station NG tracé seulement.");
+                return new MaintenanceCommandResult
+                {
+                    Ok = true,
+                    Command = commandName,
+                    Message = "Simulateur actif : enable station NG = " + targetLabel + " tracé seulement.",
+                    RequiresExpert = false,
+                    TerrainValidated = false,
+                    Simulated = true,
+                    Mode = "NG_STATION_ENABLE",
+                    Register = NgPusherEnableRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = targetLabel
+                };
+            }
+
+            ushort before;
+            var hasBefore = TryReadHoldingSingleNoLock(_config, NgPusherEnableRegister, out before);
+            var writeOk = WritePistonIoMaintenanceSingleNoLock(_config, NgPusherEnableRegister, enable ? PusherActiveValue : (ushort)0);
+            Thread.Sleep(150);
+            ushort after;
+            var hasAfter = TryReadHoldingSingleNoLock(_config, NgPusherEnableRegister, out after);
+            var ok = writeOk && hasAfter && (after != 0) == enable;
+
+            var detail = "Enable station NG 28424: avant=" + (hasBefore ? before.ToString(CultureInfo.InvariantCulture) : "--") +
+                         " cible=" + targetLabel +
+                         " relu=" + (hasAfter ? after.ToString(CultureInfo.InvariantCulture) : "--") +
+                         ". La sortie 28936 n'est pas écrite; l'enable reste en place (pas d'impulsion).";
+            _trace.Append("MAINTENANCE", commandName, ok ? "SENT" : "ERROR", "UI", NgPusherEnableRegister.ToString(CultureInfo.InvariantCulture), targetLabel, detail);
+
+            return new MaintenanceCommandResult
+            {
+                Ok = ok,
+                Command = commandName,
+                Message = ok
+                    ? (enable
+                        ? "Station NG armée (enable 28424=1, maintenu). Lancer RÉARMER puis DÉMARRER et observer le battement du poussoir NG à chaque avance."
+                        : "Station NG désarmée (enable 28424=0).")
+                    : "Échec écriture enable station NG. " + detail,
+                RequiresExpert = false,
+                TerrainValidated = false,
+                Simulated = false,
+                Mode = "NG_STATION_ENABLE",
+                Register = NgPusherEnableRegister.ToString(CultureInfo.InvariantCulture),
+                Value = targetLabel,
+                StateBefore = hasBefore ? before.ToString(CultureInfo.InvariantCulture) : null,
+                StateAfter = hasAfter ? after.ToString(CultureInfo.InvariantCulture) : null
+            };
         }
 
         private MaintenanceCommandResult ExecuteNgPusherReleaseNoLock(string commandName)
@@ -2412,20 +2533,345 @@ namespace SortingMachineDesktop
             }
 
             var release = ReleaseNgPusherResetNoLock(_config, commandName, "UI", true);
+            var releaseMessage = release.Message + " Aucun enable/sortie NG 28424/28936 n'a été écrit.";
             return new MaintenanceCommandResult
             {
                 Ok = release.CommandReleased,
                 Command = commandName,
-                Message = release.Message,
+                Message = releaseMessage,
                 RequiresExpert = false,
                 TerrainValidated = release.FeedbackReleased,
                 Simulated = false,
                 Mode = "NG_RESET_RELEASE",
                 Register = NgPusherResetRegister.ToString(CultureInfo.InvariantCulture),
-                Value = PusherResetReleasedValue.ToString(CultureInfo.InvariantCulture),
+                Value = "reset=" + PusherResetReleasedValue.ToString(CultureInfo.InvariantCulture),
                 StateRegister = NgPusherReadbackRegister.ToString(CultureInfo.InvariantCulture),
                 StateBefore = release.HasFeedbackBefore ? release.FeedbackBefore.ToString(CultureInfo.InvariantCulture) : null,
                 StateAfter = release.HasFeedbackAfter ? release.FeedbackAfter.ToString(CultureInfo.InvariantCulture) : null
+            };
+        }
+
+        private MaintenanceCommandResult ExecuteNgPusherDiagnosticPulseNoLock(string commandName)
+        {
+            if (_operatorStartArmed || _lotControlEnabled)
+            {
+                var runBlockMessage = "Diagnostic NG bloqué pendant le cycle. Envoyer STOP ou PAUSE, attendre l'arrêt des tops 8230, puis relancer le diagnostic NG.";
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "BLOCKED_RUN",
+                    "LOCAL",
+                    _config.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                    _lastRecordedHandshake.HasValue ? _lastRecordedHandshake.Value.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                    runBlockMessage
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = runBlockMessage,
+                    RequiresExpert = false,
+                    BlockedBySafety = true,
+                    TerrainValidated = true,
+                    Simulated = _config.UseSimulator,
+                    Mode = "NG_OUTPUT_DIAGNOSTIC",
+                    OutputRegister = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    StateRegister = NgPusherReadbackRegister.ToString(CultureInfo.InvariantCulture)
+                };
+            }
+
+            var safetyBlock = _config.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
+            if (!string.IsNullOrWhiteSpace(safetyBlock))
+            {
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "BLOCKED",
+                    "PLC",
+                    _config.AlarmRegister.ToString(CultureInfo.InvariantCulture),
+                    BuildAlarmSummary(_alarmsActive),
+                    "Diagnostic NG non envoyé: " + safetyBlock
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = safetyBlock,
+                    RequiresExpert = false,
+                    BlockedBySafety = true,
+                    TerrainValidated = true,
+                    Simulated = _config.UseSimulator,
+                    Mode = "NG_OUTPUT_DIAGNOSTIC",
+                    OutputRegister = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    StateRegister = NgPusherReadbackRegister.ToString(CultureInfo.InvariantCulture)
+                };
+            }
+
+            _trace.Append(
+                "MAINTENANCE",
+                commandName,
+                _config.UseSimulator ? "SIMULATED" : "ATTEMPT",
+                _config.UseSimulator ? "SIMULATEUR" : "UI",
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=1",
+                "Diagnostic sortie carte Y11: 4X 3144 bit 10 ON " +
+                NgPusherDiagnosticPulseMs.ToString(CultureInfo.InvariantCulture) +
+                " ms puis OFF. Ce n'est pas le verin NG; aucun piston ni convoyeur n'est ecrit."
+            );
+
+            if (_config.UseSimulator)
+            {
+                return new MaintenanceCommandResult
+                {
+                    Ok = true,
+                    Command = commandName,
+                    Message = "Simulateur actif : diagnostic NG tracé seulement.",
+                    RequiresExpert = false,
+                    TerrainValidated = false,
+                    Simulated = true,
+                    Mode = "NG_OUTPUT_DIAGNOSTIC",
+                    OutputRegister = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    StateRegister = NgPusherReadbackRegister.ToString(CultureInfo.InvariantCulture)
+                };
+            }
+
+            CancelScheduledPusherWorkNoLock(commandName);
+
+            ushort stateBefore;
+            ushort stateAfter;
+            var hasStateBefore = TryReadHoldingSingleNoLock(_config, NgPusherReadbackRegister, out stateBefore);
+            string y11Detail;
+            var ok = PulseY11OutputBitNoLock(
+                _config,
+                "MAINTENANCE",
+                commandName,
+                "UI",
+                "Diagnostic NG terrain valide",
+                NgPusherDiagnosticPulseMs,
+                out y11Detail);
+            var hasStateAfter = TryReadHoldingSingleNoLock(_config, NgPusherReadbackRegister, out stateAfter);
+            var stateDetail = "Retour repos 28689: avant=" +
+                (hasStateBefore ? stateBefore.ToString(CultureInfo.InvariantCulture) : "--") +
+                " apres=" +
+                (hasStateAfter ? stateAfter.ToString(CultureInfo.InvariantCulture) : "--") +
+                ". " + y11Detail;
+
+            _trace.Append(
+                "MAINTENANCE",
+                commandName,
+                ok ? "SENT" : "ERROR",
+                "UI",
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=1",
+                stateDetail
+            );
+
+            return new MaintenanceCommandResult
+            {
+                Ok = ok,
+                Command = commandName,
+                Message = ok
+                    ? "Diagnostic Y11 envoyé : observer la LED Y de la carte. Pour tester le vérin NG, utiliser le test piston NG."
+                    : "Échec diagnostic Y11 : la commande n'a pas été acceptée.",
+                RequiresExpert = false,
+                TerrainValidated = ok,
+                Simulated = false,
+                Mode = "NG_Y11_DIAGNOSTIC",
+                Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + " ON " + NgPusherDiagnosticPulseMs.ToString(CultureInfo.InvariantCulture) + " ms puis OFF",
+                OutputRegister = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                StateRegister = NgPusherReadbackRegister.ToString(CultureInfo.InvariantCulture),
+                StateBefore = hasStateBefore ? stateBefore.ToString(CultureInfo.InvariantCulture) : null,
+                StateAfter = hasStateAfter ? stateAfter.ToString(CultureInfo.InvariantCulture) : null
+            };
+        }
+
+        private MaintenanceCommandResult ExecuteY11OutputBitNoLock(string commandName, bool active)
+        {
+            var targetLabel = active ? "ON" : "OFF";
+            var targetValueText = active ? "1" : "0";
+
+            if (_operatorStartArmed || _lotControlEnabled)
+            {
+                var runBlockMessage = "Commande brute Y11 bloquée pendant le cycle. Envoyer STOP ou PAUSE, attendre l'arrêt machine, puis relancer le diagnostic Y11.";
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "BLOCKED_RUN",
+                    "LOCAL",
+                    Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    targetValueText,
+                    runBlockMessage
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = runBlockMessage,
+                    RequiresExpert = true,
+                    TerrainValidated = false,
+                    BlockedBySafety = true,
+                    Simulated = _config.UseSimulator,
+                    Mode = "Y11_OUTPUT_BIT",
+                    Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText
+                };
+            }
+
+            if (active && !_config.UseSimulator)
+            {
+                var latchedOnBlockMessage = "Y11 ON maintenu bloqué en réel : utiliser Diagnostic sortie NG, qui pulse Y11 puis revient OFF, ou Y11 OFF pour libérer la sortie.";
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "BLOCKED_LATCHED_ON",
+                    "LOCAL",
+                    Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    targetValueText,
+                    latchedOnBlockMessage
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = latchedOnBlockMessage,
+                    RequiresExpert = true,
+                    TerrainValidated = false,
+                    BlockedBySafety = true,
+                    Simulated = false,
+                    Mode = "Y11_OUTPUT_BIT",
+                    Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText
+                };
+            }
+
+            if (active)
+            {
+                var safetyBlock = _config.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
+                if (!string.IsNullOrWhiteSpace(safetyBlock))
+                {
+                    var blockMessage = "Activation Y11 bloquée : " + safetyBlock;
+                    _trace.Append(
+                        "MAINTENANCE",
+                        commandName,
+                        "BLOCKED",
+                        "PLC",
+                        Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                        targetValueText,
+                        blockMessage
+                    );
+                    return new MaintenanceCommandResult
+                    {
+                        Ok = false,
+                        Command = commandName,
+                        Message = blockMessage,
+                        RequiresExpert = true,
+                        TerrainValidated = false,
+                        BlockedBySafety = true,
+                        Simulated = _config.UseSimulator,
+                        Mode = "Y11_OUTPUT_BIT",
+                        Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                        Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText
+                    };
+                }
+            }
+
+            _trace.Append(
+                "MAINTENANCE",
+                commandName,
+                _config.UseSimulator ? "SIMULATED" : "ATTEMPT",
+                _config.UseSimulator ? "SIMULATEUR" : "UI",
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText,
+                "Diagnostic sortie Y11 " + targetLabel + " : read-modify-write 4X 3144 bit 10 uniquement."
+            );
+
+            if (_config.UseSimulator)
+            {
+                return new MaintenanceCommandResult
+                {
+                    Ok = true,
+                    Command = commandName,
+                    Message = "Simulateur actif : diagnostic Y11 " + targetLabel + " tracé seulement.",
+                    RequiresExpert = true,
+                    TerrainValidated = false,
+                    Simulated = true,
+                    Mode = "Y11_OUTPUT_BIT",
+                    Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText
+                };
+            }
+
+            ushort before;
+            if (!TryReadHoldingSingleNoLock(_config, Y11OutputImageRegister, out before))
+            {
+                var readFailMessage = "Diagnostic Y11 impossible : lecture 4X 3144 refusée. Aucune écriture n'est envoyée pour éviter de modifier les autres sorties Y.";
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "READ_ERROR",
+                    "PLC",
+                    Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    targetValueText,
+                    readFailMessage
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = readFailMessage,
+                    RequiresExpert = true,
+                    TerrainValidated = false,
+                    Simulated = false,
+                    Mode = "Y11_OUTPUT_BIT",
+                    Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText
+                };
+            }
+
+            var targetRegisterValue = active
+                ? (ushort)(before | Y11OutputImageMask)
+                : (ushort)(before & Y11OutputImageClearMask);
+            var writeOk = WriteHoldingSingleNoLock(_config, Y11OutputImageRegister, targetRegisterValue);
+            Thread.Sleep(150);
+
+            ushort after;
+            var hasAfter = TryReadHoldingSingleNoLock(_config, Y11OutputImageRegister, out after);
+            var beforeBit = IsY11OutputImageBitSet(before);
+            var afterBit = hasAfter && IsY11OutputImageBitSet(after);
+            var ok = writeOk && hasAfter && afterBit == active;
+            var detail = "3144 " + before.ToString(CultureInfo.InvariantCulture) +
+                         "->" + (hasAfter ? after.ToString(CultureInfo.InvariantCulture) : "--") +
+                         " ; Y11 bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) +
+                         " " + (beforeBit ? "1" : "0") +
+                         "->" + (hasAfter ? (afterBit ? "1" : "0") : "--") +
+                         " ; masque 0x0400.";
+
+            _trace.Append(
+                "MAINTENANCE",
+                commandName,
+                ok ? "SENT" : "ERROR",
+                "UI",
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                targetRegisterValue.ToString(CultureInfo.InvariantCulture),
+                "Diagnostic Y11 " + targetLabel + " : " + detail
+            );
+
+            return new MaintenanceCommandResult
+            {
+                Ok = ok,
+                Command = commandName,
+                Message = ok
+                    ? "Diagnostic Y11 " + targetLabel + " envoyé : " + detail
+                    : "Échec diagnostic Y11 " + targetLabel + " : " + detail,
+                RequiresExpert = true,
+                TerrainValidated = false,
+                Simulated = false,
+                Mode = "Y11_OUTPUT_BIT",
+                Register = Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                Value = "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=" + targetValueText,
+                StateBefore = (beforeBit ? "1" : "0"),
+                StateAfter = hasAfter ? (afterBit ? "1" : "0") : null
             };
         }
 
@@ -2474,31 +2920,7 @@ namespace SortingMachineDesktop
                     };
                 }
 
-                if (!_config.UseSimulator)
-                {
-                    var blockedMessage = "Test vérin direct désactivé : les banques I/O 28295/28414/28926 ne sont pas validées terrain pour piloter les lignes GOOD. Le routage réel doit passer par les seuils machine 1188..1370 et l'automate.";
-                    _trace.Append(
-                        "MAINTENANCE",
-                        "PISTON_TEST_" + normalizedLane,
-                        "BLOCKED_UNVALIDATED_IO",
-                        "LOCAL",
-                        "28295/28414/28926",
-                        normalizedLane,
-                        blockedMessage
-                    );
-                    return new MaintenanceCommandResult
-                    {
-                        Ok = false,
-                        Command = "PISTON_TEST_" + normalizedLane,
-                        Message = blockedMessage,
-                        RequiresExpert = false,
-                        BlockedBySafety = true,
-                        TerrainValidated = false,
-                        Simulated = false
-                    };
-                }
-
-                if (!_config.UseSimulator && _operatorStartArmed && _lotControlEnabled)
+                if (IsPistonMaintenanceBlockedByRunStateNoLock())
                 {
                     var runBlockMessage = "Test piston manuel bloqué pendant le tri en cours. Utiliser STOP ou PAUSE, attendre l'arrêt des tops 8230, puis relancer le test vérin.";
                     _trace.Append(
@@ -2573,7 +2995,7 @@ namespace SortingMachineDesktop
                     BuildPusherCommandSnapshotNoLock(_config, resetRegister, enableRegister, outputRegister)
                 );
 
-                var preReleaseOk = PreparePusherLaneForPulseNoLock(
+                var preReleaseOk = PreparePusherLaneForMaintenancePulseNoLock(
                     _config,
                     "MAINTENANCE",
                     commandName,
@@ -2586,7 +3008,7 @@ namespace SortingMachineDesktop
                 var enableOk = false;
                 if (preReleaseOk)
                 {
-                    enableOk = WritePistonIoSingleNoLock(_config, enableRegister, PusherActiveValue);
+                    enableOk = WritePistonIoMaintenanceSingleNoLock(_config, enableRegister, PusherActiveValue);
                 }
                 _trace.Append("MAINTENANCE", commandName, enableOk ? "ENABLE_SENT" : "ENABLE_ERROR", "UI", enableRegister.ToString(CultureInfo.InvariantCulture), PusherActiveValue.ToString(CultureInfo.InvariantCulture), "Activation sortie piston.");
 
@@ -2595,11 +3017,11 @@ namespace SortingMachineDesktop
                 if (enableOk)
                 {
                     Thread.Sleep(PusherEnableSettleMs);
-                    outputOk = WritePistonIoSingleNoLock(_config, outputRegister, PusherActiveValue);
+                    outputOk = WritePistonIoMaintenanceSingleNoLock(_config, outputRegister, PusherActiveValue);
                     _trace.Append("MAINTENANCE", commandName, outputOk ? "OUTPUT_SENT" : "OUTPUT_ERROR", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherActiveValue.ToString(CultureInfo.InvariantCulture), "Impulsion sortie piston.");
                     if (outputOk)
                     {
-                        Thread.Sleep(PusherPulseMs);
+                        Thread.Sleep(MaintenancePusherPulseMs);
                         hasStateDuring = TryReadHoldingSingleNoLock(_config, stateRegister, out stateDuring);
                     }
                     else
@@ -2612,10 +3034,10 @@ namespace SortingMachineDesktop
                     stateDuring = 0;
                 }
 
-                var outputReleaseOk = WritePistonIoSingleNoLock(_config, outputRegister, PusherInactiveValue);
+                var outputReleaseOk = WritePistonIoMaintenanceSingleNoLock(_config, outputRegister, PusherInactiveValue);
                 _trace.Append("MAINTENANCE", commandName, outputReleaseOk ? "OUTPUT_RELEASE" : "OUTPUT_RELEASE_ERROR", "UI", outputRegister.ToString(CultureInfo.InvariantCulture), PusherInactiveValue.ToString(CultureInfo.InvariantCulture), "Relachement sortie piston.");
 
-                var enableReleaseOk = WritePistonIoSingleNoLock(_config, enableRegister, PusherInactiveValue);
+                var enableReleaseOk = WritePistonIoMaintenanceSingleNoLock(_config, enableRegister, PusherInactiveValue);
                 _trace.Append("MAINTENANCE", commandName, enableReleaseOk ? "ENABLE_RELEASE" : "ENABLE_RELEASE_ERROR", "UI", enableRegister.ToString(CultureInfo.InvariantCulture), PusherInactiveValue.ToString(CultureInfo.InvariantCulture), "Retour mode auto apres test piston.");
 
                 var hasStateAfter = TryReadHoldingSingleNoLock(_config, stateRegister, out stateAfter);
@@ -2640,14 +3062,14 @@ namespace SortingMachineDesktop
                     Ok = ok,
                     Command = commandName,
                     Message = ok
-                        ? "Test piston " + normalizedLane + " envoyé."
+                    ? "Test piston " + normalizedLane + " envoyé; impulsion maintenue " + MaintenancePusherPulseMs.ToString(CultureInfo.InvariantCulture) + " ms."
                         : "Échec d’envoi du test piston " + normalizedLane + ".",
                     RequiresExpert = false,
                     TerrainValidated = false,
                     Simulated = false,
                     Mode = "PUSH_CYLINDER_IO",
                     Register = outputRegister.ToString(CultureInfo.InvariantCulture),
-                    Value = PusherActiveValue.ToString(CultureInfo.InvariantCulture),
+                    Value = PusherActiveValue.ToString(CultureInfo.InvariantCulture) + " pendant " + MaintenancePusherPulseMs.ToString(CultureInfo.InvariantCulture) + " ms",
                     EnableRegister = enableRegister.ToString(CultureInfo.InvariantCulture),
                     OutputRegister = outputRegister.ToString(CultureInfo.InvariantCulture),
                     StateRegister = stateRegister.ToString(CultureInfo.InvariantCulture),
@@ -2656,6 +3078,13 @@ namespace SortingMachineDesktop
                     StateAfter = hasStateAfter ? stateAfter.ToString(CultureInfo.InvariantCulture) : null
                 };
             }
+        }
+
+        private bool IsPistonMaintenanceBlockedByRunStateNoLock()
+        {
+            return _config != null &&
+                   !_config.UseSimulator &&
+                   (_operatorStartArmed || _lotControlEnabled);
         }
 
         private static bool TryResolvePistonLane(string laneId, out int laneNumber)
@@ -2677,265 +3106,33 @@ namespace SortingMachineDesktop
             return false;
         }
 
-        private bool ScheduleRoutingPusherNoLock(MachineConfig cfg, string laneId, int? handshakeValue, string source, string reason, bool runNgSafetyAfter)
+        private void SetLastNgPulseNoLock(
+            int? handshakeValue,
+            string status,
+            ushort enableRegister,
+            ushort outputRegister,
+            ushort enableValue,
+            ushort outputValue,
+            string result,
+            string source,
+            string detail)
         {
-            if (cfg == null || !cfg.UseSimulator)
+            _lastNgPulseDiagnostic = new NgPulseDiagnostic
             {
-                _trace.Append(
-                    "ROUTING",
-                    "PUSHER_DIRECT",
-                    "BLOCKED_DISABLED",
-                    source,
-                    "28295/28414/28926",
-                    string.IsNullOrWhiteSpace(laneId) ? "NG" : laneId,
-                    "Impulsion piston directe désactivée en réel. Le routage physique reste confié à l'automate; aucune écriture piston n'est planifiée."
-                );
-                return false;
-            }
-
-            var safetyBlock = cfg.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
-            if (!string.IsNullOrWhiteSpace(safetyBlock))
-            {
-                _trace.Append(
-                    "ROUTING",
-                    "PUSHER_DIRECT",
-                    "BLOCKED",
-                    source,
-                    cfg.AlarmRegister.ToString(CultureInfo.InvariantCulture),
-                    BuildAlarmSummary(_alarmsActive),
-                    "Impulsion piston non planifiee: " + safetyBlock
-                );
-                return false;
-            }
-
-            var requestedLane = string.IsNullOrWhiteSpace(laneId)
-                ? "NG"
-                : laneId.Trim().ToUpperInvariant();
-            int laneNumber;
-            var resolved = TryResolvePistonLane(requestedLane, out laneNumber);
-            if (!resolved)
-            {
-                requestedLane = "NG";
-                TryResolvePistonLane(requestedLane, out laneNumber);
-            }
-
-            var laneIndex = laneNumber - 1;
-            var outputRegister = (ushort)(PusherCylinderOutputBaseRegister + laneIndex);
-            var sequence = Interlocked.Increment(ref _nextPusherWorkId);
-            var request = new ScheduledPusherWork
-            {
-                Sequence = sequence,
-                Config = CopyConfig(cfg),
-                LaneId = requestedLane,
-                HandshakeValue = handshakeValue,
-                Source = cfg.UseSimulator ? "SIMULATEUR" : source,
-                Reason = string.IsNullOrWhiteSpace(reason) ? "DECISION" : reason,
-                RunNgSafetyAfter = runNgSafetyAfter,
-                DelayMs = PusherDecisionDelayMs,
-                Generation = _pusherWorkGeneration
+                Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                Handshake = handshakeValue,
+                Status = string.IsNullOrWhiteSpace(status) ? "UNKNOWN" : status,
+                OutputPath = "Y11_4X_3144_BIT_10",
+                OutputImageRegister = Y11OutputImageRegister,
+                OutputBit = Y11OutputImageBit,
+                EnableRegister = enableRegister,
+                OutputRegister = outputRegister,
+                EnableValue = enableValue,
+                OutputValue = outputValue,
+                Result = string.IsNullOrWhiteSpace(result) ? "UNKNOWN" : result,
+                Source = string.IsNullOrWhiteSpace(source) ? "LOCAL" : source,
+                Detail = string.IsNullOrWhiteSpace(detail) ? string.Empty : detail
             };
-
-            _trace.Append(
-                "ROUTING",
-                "PUSHER_DIRECT",
-                cfg.UseSimulator ? "SIMULATED" : "SCHEDULED",
-                request.Source,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                "seq=" + sequence.ToString(CultureInfo.InvariantCulture) +
-                " HS=" + (handshakeValue.HasValue ? handshakeValue.Value.ToString(CultureInfo.InvariantCulture) : "--") +
-                " ligne=" + requestedLane +
-                " delay_ms=" + PusherDecisionDelayMs.ToString(CultureInfo.InvariantCulture) +
-                " pulse_ms=" + PusherPulseMs.ToString(CultureInfo.InvariantCulture) +
-                " generation=" + request.Generation.ToString(CultureInfo.InvariantCulture) +
-                " ng_after=" + (runNgSafetyAfter ? "YES" : "NO") +
-                (resolved ? string.Empty : " Ligne demandee invalide: fallback NG.")
-            );
-
-            if (cfg.UseSimulator)
-            {
-                return true;
-            }
-
-            ThreadPool.QueueUserWorkItem(RunScheduledRoutingPusher, request);
-            return true;
-        }
-
-        private bool ScheduleNgSafetySweepForHandshakeNoLock(MachineConfig cfg, int handshakeValue, string source, string reason)
-        {
-            if (cfg == null || !cfg.UseSimulator)
-            {
-                _trace.Append(
-                    "SAFETY",
-                    "NG_SWEEP",
-                    "BLOCKED_DISABLED",
-                    source,
-                    NgPusherOutputRegister.ToString(CultureInfo.InvariantCulture),
-                    handshakeValue.ToString(CultureInfo.InvariantCulture),
-                    "Balayage NG automatique supprimé : il pouvait laisser le vérin NG sorti. Aucune sortie piston NG n'est planifiée."
-                );
-                return false;
-            }
-
-            var safetyBlock = cfg.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
-            if (!string.IsNullOrWhiteSpace(safetyBlock))
-            {
-                _trace.Append(
-                    "SAFETY",
-                    "NG_SWEEP",
-                    "BLOCKED",
-                    source,
-                    cfg.AlarmRegister.ToString(CultureInfo.InvariantCulture),
-                    BuildAlarmSummary(_alarmsActive),
-                    "Balayage NG non planifie: " + safetyBlock
-                );
-                return false;
-            }
-
-            var sequence = Interlocked.Increment(ref _nextPusherWorkId);
-            var outputRegister = (ushort)(PusherCylinderOutputBaseRegister + NgPhysicalPusherLane - 1);
-            var request = new ScheduledNgSweepWork
-            {
-                Sequence = sequence,
-                Config = CopyConfig(cfg),
-                HandshakeValue = handshakeValue,
-                Source = cfg.UseSimulator ? "SIMULATEUR" : source,
-                Reason = string.IsNullOrWhiteSpace(reason) ? "HANDSHAKE" : reason,
-                DelayMs = PusherDecisionDelayMs,
-                Generation = _pusherWorkGeneration
-            };
-
-            _trace.Append(
-                "SAFETY",
-                "NG_SWEEP",
-                cfg.UseSimulator ? "SIMULATED" : "SCHEDULED",
-                request.Source,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                "seq=" + sequence.ToString(CultureInfo.InvariantCulture) +
-                " HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) +
-                " reason=" + request.Reason +
-                " delay_ms=" + PusherDecisionDelayMs.ToString(CultureInfo.InvariantCulture) +
-                " pulse_ms=" + PusherPulseMs.ToString(CultureInfo.InvariantCulture) +
-                " generation=" + request.Generation.ToString(CultureInfo.InvariantCulture)
-            );
-
-            if (cfg.UseSimulator)
-            {
-                return true;
-            }
-
-            ThreadPool.QueueUserWorkItem(RunScheduledNgSweep, request);
-            return true;
-        }
-
-        private void RunScheduledRoutingPusher(object state)
-        {
-            var request = state as ScheduledPusherWork;
-            if (request == null || request.Config == null)
-            {
-                return;
-            }
-
-            try
-            {
-                if (request.DelayMs > 0)
-                {
-                    Thread.Sleep(request.DelayMs);
-                }
-
-                lock (_lock)
-                {
-                    if (request.Generation != _pusherWorkGeneration)
-                    {
-                        _trace.Append(
-                            "ROUTING",
-                            "PUSHER_DIRECT",
-                            "CANCELED",
-                            request.Source,
-                            request.Sequence.ToString(CultureInfo.InvariantCulture),
-                            request.LaneId,
-                            "Impulsion planifiee abandonnee: generation=" + request.Generation.ToString(CultureInfo.InvariantCulture) +
-                            " active=" + _pusherWorkGeneration.ToString(CultureInfo.InvariantCulture) + "."
-                        );
-                        return;
-                    }
-
-                    PulseRoutingPusherNoLock(
-                        request.Config,
-                        request.LaneId,
-                        request.HandshakeValue,
-                        request.Source,
-                        request.Reason + "_SEQ_" + request.Sequence.ToString(CultureInfo.InvariantCulture));
-
-                    if (request.RunNgSafetyAfter && request.HandshakeValue.HasValue)
-                    {
-                        Thread.Sleep(PusherNgSafetyAfterDecisionMs);
-                        PulseNgSafetySweepForHandshakeNoLock(request.Config, request.HandshakeValue.Value, request.Source);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _trace.Append(
-                    "ROUTING",
-                    "PUSHER_WORKER",
-                    "ERROR",
-                    request.Source,
-                    request.Sequence.ToString(CultureInfo.InvariantCulture),
-                    request.LaneId,
-                    "Execution piston planifiee interrompue: " + ex.Message
-                );
-            }
-        }
-
-        private void RunScheduledNgSweep(object state)
-        {
-            var request = state as ScheduledNgSweepWork;
-            if (request == null || request.Config == null)
-            {
-                return;
-            }
-
-            try
-            {
-                if (request.DelayMs > 0)
-                {
-                    Thread.Sleep(request.DelayMs);
-                }
-
-                lock (_lock)
-                {
-                    if (request.Generation != _pusherWorkGeneration)
-                    {
-                        _trace.Append(
-                            "SAFETY",
-                            "NG_SWEEP",
-                            "CANCELED",
-                            request.Source,
-                            request.Sequence.ToString(CultureInfo.InvariantCulture),
-                            request.HandshakeValue.ToString(CultureInfo.InvariantCulture),
-                            "Balayage NG planifie abandonne: generation=" + request.Generation.ToString(CultureInfo.InvariantCulture) +
-                            " active=" + _pusherWorkGeneration.ToString(CultureInfo.InvariantCulture) + "."
-                        );
-                        return;
-                    }
-
-                    PulseNgSafetySweepForHandshakeNoLock(request.Config, request.HandshakeValue, request.Source);
-                }
-            }
-            catch (Exception ex)
-            {
-                _trace.Append(
-                    "SAFETY",
-                    "NG_SWEEP_WORKER",
-                    "ERROR",
-                    request.Source,
-                    request.Sequence.ToString(CultureInfo.InvariantCulture),
-                    request.HandshakeValue.ToString(CultureInfo.InvariantCulture),
-                    "Execution NG planifiee interrompue (" + request.Reason + "): " + ex.Message
-                );
-            }
         }
 
         private void CancelScheduledPusherWorkNoLock(string reason)
@@ -2974,6 +3171,27 @@ namespace SortingMachineDesktop
             return ok;
         }
 
+        private bool PreparePusherLaneForMaintenancePulseNoLock(MachineConfig cfg, string traceCategory, string traceAction, string source, string laneDetail, ushort enableRegister, ushort outputRegister, string context)
+        {
+            var outputOffOk = WritePistonIoMaintenanceSingleNoLock(cfg, outputRegister, PusherInactiveValue);
+            var enableOffOk = WritePistonIoMaintenanceSingleNoLock(cfg, enableRegister, PusherInactiveValue);
+
+            Thread.Sleep(PusherPreReleaseSettleMs);
+
+            var ok = outputOffOk && enableOffOk;
+            _trace.Append(
+                traceCategory,
+                traceAction,
+                ok ? "PRE_RELEASE" : "PRE_RELEASE_ERROR",
+                source,
+                enableRegister.ToString(CultureInfo.InvariantCulture) + "/" + outputRegister.ToString(CultureInfo.InvariantCulture),
+                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
+                context + " " + laneDetail + " : front montant force, sortie et enable de cette voie uniquement remis a 0 avant impulsion maintenance."
+            );
+
+            return ok;
+        }
+
         private string BuildPusherCommandSnapshotNoLock(MachineConfig cfg, ushort resetRegister, ushort enableRegister, ushort outputRegister)
         {
             ushort resetValue;
@@ -2991,319 +3209,10 @@ namespace SortingMachineDesktop
                    enableRegister.ToString(CultureInfo.InvariantCulture) +
                    "=" +
                    (hasEnable ? enableValue.ToString(CultureInfo.InvariantCulture) : "--") +
-                   ", sortie 4X " +
+                   ", sortie holding 4X " +
                    outputRegister.ToString(CultureInfo.InvariantCulture) +
                    "=" +
                    (hasOutput ? outputValue.ToString(CultureInfo.InvariantCulture) : "--");
-        }
-
-        private bool PulseRoutingPusherNoLock(MachineConfig cfg, string laneId, int? handshakeValue, string source, string reason)
-        {
-            if (cfg == null || !cfg.UseSimulator)
-            {
-                _trace.Append(
-                    "ROUTING",
-                    "PUSHER_DIRECT",
-                    "BLOCKED_DISABLED",
-                    source,
-                    "28295/28414/28926",
-                    string.IsNullOrWhiteSpace(laneId) ? "NG" : laneId,
-                    "Impulsion piston directe bloquée en réel. Aucune écriture enable/sortie n'est envoyée."
-                );
-                return false;
-            }
-
-            var safetyBlock = cfg.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
-            if (!string.IsNullOrWhiteSpace(safetyBlock))
-            {
-                _trace.Append(
-                    "ROUTING",
-                    "PUSHER_DIRECT",
-                    "BLOCKED",
-                    source,
-                    cfg.AlarmRegister.ToString(CultureInfo.InvariantCulture),
-                    BuildAlarmSummary(_alarmsActive),
-                    "Impulsion piston non envoyee: " + safetyBlock
-                );
-                return false;
-            }
-
-            var requestedLane = string.IsNullOrWhiteSpace(laneId)
-                ? "NG"
-                : laneId.Trim().ToUpperInvariant();
-            int laneNumber;
-            var resolved = TryResolvePistonLane(requestedLane, out laneNumber);
-            if (!resolved)
-            {
-                requestedLane = "NG";
-                TryResolvePistonLane(requestedLane, out laneNumber);
-            }
-
-            var laneIndex = laneNumber - 1;
-            var stateRegister = (ushort)(PusherCylinderStateBaseRegister + laneIndex);
-            var enableRegister = (ushort)(PusherCylinderEnableBaseRegister + laneIndex);
-            var outputRegister = (ushort)(PusherCylinderOutputBaseRegister + laneIndex);
-            var plcSource = cfg.UseSimulator ? "SIMULATEUR" : source;
-            var handshakeDetail = handshakeValue.HasValue
-                ? "HS=" + handshakeValue.Value.ToString(CultureInfo.InvariantCulture)
-                : "HS=--";
-            var detail = BuildPistonPulseDetail(
-                "Impulsion directe apres decision cellule",
-                requestedLane,
-                laneNumber,
-                enableRegister,
-                outputRegister);
-
-            _trace.Append(
-                "ROUTING",
-                "PUSHER_DIRECT",
-                cfg.UseSimulator ? "SIMULATED" : "ATTEMPT",
-                plcSource,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                handshakeDetail + " reason=" + reason + " " + detail + (resolved ? string.Empty : " Ligne demandee invalide: fallback NG.")
-            );
-
-            if (cfg.UseSimulator)
-            {
-                return true;
-            }
-
-            ushort stateBefore;
-            var hasStateBefore = TryReadHoldingSingleNoLock(cfg, stateRegister, out stateBefore);
-            var stateNote = hasStateBefore
-                ? " Etat avant=" + stateBefore.ToString(CultureInfo.InvariantCulture) + "."
-                : string.Empty;
-
-            var preReleaseOk = PreparePusherLaneForPulseNoLock(
-                cfg,
-                "ROUTING",
-                "PUSHER_DIRECT",
-                plcSource,
-                "ligne=" + requestedLane + " " + handshakeDetail,
-                enableRegister,
-                outputRegister,
-                "Routage cellule");
-
-            var enableOk = false;
-            if (preReleaseOk)
-            {
-                enableOk = WritePistonIoSingleNoLock(cfg, enableRegister, PusherActiveValue);
-            }
-            _trace.Append(
-                "ROUTING",
-                "PUSHER_DIRECT",
-                enableOk ? "ENABLE_SENT" : "ENABLE_ERROR",
-                plcSource,
-                enableRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                handshakeDetail + " ligne=" + requestedLane + " activation sortie piston." + stateNote
-            );
-
-            var outputOk = false;
-            if (enableOk)
-            {
-                Thread.Sleep(PusherEnableSettleMs);
-                outputOk = WritePistonIoSingleNoLock(cfg, outputRegister, PusherActiveValue);
-                _trace.Append(
-                    "ROUTING",
-                    "PUSHER_DIRECT",
-                    outputOk ? "OUTPUT_SENT" : "OUTPUT_ERROR",
-                    plcSource,
-                    outputRegister.ToString(CultureInfo.InvariantCulture),
-                    PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                    handshakeDetail + " ligne=" + requestedLane + " impulsion sortie piston."
-                );
-                if (outputOk)
-                {
-                    Thread.Sleep(PusherPulseMs);
-                }
-            }
-
-            var outputReleaseOk = WritePistonIoSingleNoLock(cfg, outputRegister, PusherInactiveValue);
-            _trace.Append(
-                "ROUTING",
-                "PUSHER_DIRECT",
-                outputReleaseOk ? "OUTPUT_RELEASE" : "OUTPUT_RELEASE_ERROR",
-                plcSource,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
-                handshakeDetail + " ligne=" + requestedLane + " relachement sortie."
-            );
-
-            var enableReleaseOk = WritePistonIoSingleNoLock(cfg, enableRegister, PusherInactiveValue);
-            _trace.Append(
-                "ROUTING",
-                "PUSHER_DIRECT",
-                enableReleaseOk ? "ENABLE_RELEASE" : "ENABLE_RELEASE_ERROR",
-                plcSource,
-                enableRegister.ToString(CultureInfo.InvariantCulture),
-                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
-                handshakeDetail + " ligne=" + requestedLane + " relachement enable."
-            );
-
-            var ok = preReleaseOk && enableOk && outputOk && outputReleaseOk && enableReleaseOk;
-            _trace.Append(
-                "ROUTING",
-                "PUSHER_DIRECT",
-                ok ? "SENT" : "ERROR",
-                plcSource,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                ok
-                    ? handshakeDetail + " ligne=" + requestedLane + " impulsion piston decision terminee."
-                    : handshakeDetail + " ligne=" + requestedLane + " impulsion piston decision incomplete; le tri logiciel continue et l'erreur reste visible."
-            );
-
-            return ok;
-        }
-
-        private bool PulseNgSafetySweepForHandshakeNoLock(MachineConfig cfg, int handshakeValue, string source)
-        {
-            if (cfg == null || !cfg.UseSimulator)
-            {
-                _trace.Append(
-                    "SAFETY",
-                    "NG_SWEEP",
-                    "BLOCKED_DISABLED",
-                    source,
-                    NgPusherOutputRegister.ToString(CultureInfo.InvariantCulture),
-                    handshakeValue.ToString(CultureInfo.InvariantCulture),
-                    "Balayage NG automatique bloqué en réel. Le logiciel ne force plus le vérin NG."
-                );
-                return false;
-            }
-
-            var safetyBlock = cfg.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
-            if (!string.IsNullOrWhiteSpace(safetyBlock))
-            {
-                _trace.Append(
-                    "SAFETY",
-                    "NG_SWEEP",
-                    "BLOCKED",
-                    source,
-                    cfg.AlarmRegister.ToString(CultureInfo.InvariantCulture),
-                    BuildAlarmSummary(_alarmsActive),
-                    "Balayage NG non envoye: " + safetyBlock
-                );
-                return false;
-            }
-
-            var laneNumber = NgPhysicalPusherLane;
-            var laneIndex = laneNumber - 1;
-            var stateRegister = (ushort)(PusherCylinderStateBaseRegister + laneIndex);
-            var enableRegister = (ushort)(PusherCylinderEnableBaseRegister + laneIndex);
-            var outputRegister = (ushort)(PusherCylinderOutputBaseRegister + laneIndex);
-            var plcSource = cfg.UseSimulator ? "SIMULATEUR" : source;
-            var detail = BuildPistonPulseDetail(
-                "Balayage NG automatique sur changement handshake " + cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
-                "NG",
-                laneNumber,
-                enableRegister,
-                outputRegister);
-
-            _trace.Append(
-                "SAFETY",
-                "NG_SWEEP",
-                cfg.UseSimulator ? "SIMULATED" : "ATTEMPT",
-                plcSource,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " " + detail
-            );
-
-            if (cfg.UseSimulator)
-            {
-                return true;
-            }
-
-            ushort stateBefore;
-            var hasStateBefore = TryReadHoldingSingleNoLock(cfg, stateRegister, out stateBefore);
-            var stateNote = hasStateBefore
-                ? " Etat avant=" + stateBefore.ToString(CultureInfo.InvariantCulture) + "."
-                : string.Empty;
-
-            var preReleaseOk = PreparePusherLaneForPulseNoLock(
-                cfg,
-                "SAFETY",
-                "NG_SWEEP",
-                plcSource,
-                "ligne=NG HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture),
-                enableRegister,
-                outputRegister,
-                "Balayage securite NG");
-
-            var enableOk = false;
-            if (preReleaseOk)
-            {
-                enableOk = WritePistonIoSingleNoLock(cfg, enableRegister, PusherActiveValue);
-            }
-            _trace.Append(
-                "SAFETY",
-                "NG_SWEEP",
-                enableOk ? "ENABLE_SENT" : "ENABLE_ERROR",
-                plcSource,
-                enableRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " activation du piston NG uniquement." + stateNote
-            );
-
-            var outputOk = false;
-            if (enableOk)
-            {
-                Thread.Sleep(PusherEnableSettleMs);
-                outputOk = WritePistonIoSingleNoLock(cfg, outputRegister, PusherActiveValue);
-                _trace.Append(
-                    "SAFETY",
-                    "NG_SWEEP",
-                    outputOk ? "OUTPUT_SENT" : "OUTPUT_ERROR",
-                    plcSource,
-                    outputRegister.ToString(CultureInfo.InvariantCulture),
-                    PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                    "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " impulsion securite NG sur chaque avance machine."
-                );
-                if (outputOk)
-                {
-                    Thread.Sleep(PusherPulseMs);
-                }
-            }
-
-            var outputReleaseOk = WritePistonIoSingleNoLock(cfg, outputRegister, PusherInactiveValue);
-            _trace.Append(
-                "SAFETY",
-                "NG_SWEEP",
-                outputReleaseOk ? "OUTPUT_RELEASE" : "OUTPUT_RELEASE_ERROR",
-                plcSource,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
-                "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " relachement sortie NG."
-            );
-
-            var enableReleaseOk = WritePistonIoSingleNoLock(cfg, enableRegister, PusherInactiveValue);
-            _trace.Append(
-                "SAFETY",
-                "NG_SWEEP",
-                enableReleaseOk ? "ENABLE_RELEASE" : "ENABLE_RELEASE_ERROR",
-                plcSource,
-                enableRegister.ToString(CultureInfo.InvariantCulture),
-                PusherInactiveValue.ToString(CultureInfo.InvariantCulture),
-                "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " relachement enable NG."
-            );
-
-            var ok = preReleaseOk && enableOk && outputOk && outputReleaseOk && enableReleaseOk;
-            _trace.Append(
-                "SAFETY",
-                "NG_SWEEP",
-                ok ? "SENT" : "ERROR",
-                plcSource,
-                outputRegister.ToString(CultureInfo.InvariantCulture),
-                PusherActiveValue.ToString(CultureInfo.InvariantCulture),
-                ok
-                    ? "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " balayage NG automatique termine."
-                    : "HS=" + handshakeValue.ToString(CultureInfo.InvariantCulture) + " balayage NG incomplet; le defaut reste trace."
-            );
-
-            return ok;
         }
 
         private static string BuildPistonPulseDetail(string prefix, string requestedLane, int physicalLane, ushort enableRegister, ushort outputRegister)
@@ -3312,8 +3221,9 @@ namespace SortingMachineDesktop
                    ": ligne " + requestedLane +
                    " (voie physique " + physicalLane.ToString(CultureInfo.InvariantCulture) +
                    "), enable 4X " + enableRegister.ToString(CultureInfo.InvariantCulture) +
-                   " pre-relache a 0 puis = 1, sortie 4X " + outputRegister.ToString(CultureInfo.InvariantCulture) +
-                   " = 1 puis 0, enable relache a 0. Aucun autre piston n'est ecrit.";
+                   " pre-relache a 0 puis = 1, sortie " +
+                   "4X " + outputRegister.ToString(CultureInfo.InvariantCulture) +
+                   " = 1 puis 0, enable relache a 0. Aucun reset 28295..28305 et aucun autre piston ne sont ecrits.";
         }
 
         public ContractBundle GetContracts()
@@ -3327,19 +3237,133 @@ namespace SortingMachineDesktop
             {
                 ValidatedCommands = new List<MaintenanceCommandDefinition>
                 {
-                    new MaintenanceCommandDefinition { Command = "CONVEYOR_FINE_FORWARD", Label = "Micro-avance tapis", Register = "coil 1X 5981", Code = "ON puis OFF court", RequiresExpert = false, TerrainValidated = true, Warning = "Déplace très légèrement le tapis pour réaligner devant les pistons. Aucun signal piston n'est envoyé." },
-                    new MaintenanceCommandDefinition { Command = "CONVEYOR_ONLY_FORWARD", Label = "Avancer convoyeur seul", Register = "coil 1X 5981", Code = "ON puis OFF", RequiresExpert = false, TerrainValidated = true, Warning = "Pulse uniquement le convoyeur. Aucun signal piston n'est envoyé." },
-                    new MaintenanceCommandDefinition { Command = "RELEASE_NG_PISTON", Label = "Libérer vérin NG", Register = "28305", Code = "1 repos reset NG", RequiresExpert = false, TerrainValidated = true, Warning = "Remet seulement la commande reset NG au repos. N'écrit ni l'enable 28424 ni la sortie 28936." },
-                    new MaintenanceCommandDefinition { Command = "START", Label = "Démarrer machine", Register = "5978", Code = "31", RequiresExpert = false, TerrainValidated = true, Warning = string.Empty },
-                    new MaintenanceCommandDefinition { Command = "START_RAW", Label = "Démarrage brut constructeur", Register = "5978", Code = "31 seul", RequiresExpert = false, TerrainValidated = true, Warning = "Diagnostic uniquement : envoie le START constructeur sans seuils, sans lot, sans autre logique." },
-                    new MaintenanceCommandDefinition { Command = "RESET", Label = "Réarmer automate", Register = "5978", Code = "26", RequiresExpert = false, TerrainValidated = true, Warning = "Commande opérateur volontaire. À utiliser seulement si le statut 7 empêche de redémarrer; aucun registre piston n'est écrit." },
-                    new MaintenanceCommandDefinition { Command = "STOP", Label = "Arrêter machine", Register = "5978", Code = "29", RequiresExpert = false, TerrainValidated = true, Warning = string.Empty },
-                    new MaintenanceCommandDefinition { Command = "PAUSE", Label = "Pause machine", Register = "5978", Code = "32", RequiresExpert = false, TerrainValidated = true, Warning = string.Empty }
+                    new MaintenanceCommandDefinition { Command = "CONVEYOR_FINE_FORWARD", Label = "Micro-avance tapis", Register = "coil 1X 5981", Code = "coil 200 ms", RequiresExpert = false, TerrainValidated = true, Warning = "Micro-avance tapis via le coil constructeur. Zone dégagée requise." },
+                    new MaintenanceCommandDefinition { Command = "CONVEYOR_ONLY_FORWARD", Label = "Avancer convoyeur", Register = "coil 1X 5981", Code = "coil 1000 ms", RequiresExpert = false, TerrainValidated = true, Warning = "Avance tapis via le coil constructeur. Zone dégagée requise." },
+                    new MaintenanceCommandDefinition { Command = "PUSHER_STATIONS_ENABLE", Label = "Armer toutes les stations pistons (1..10 + NG)", Register = "4X 28414..28424", Code = "enable=1, maintenu", RequiresExpert = false, TerrainValidated = false, Warning = "Arme les enables constructeur de toutes les stations pistons (les sorties 28926..28936 ne sont jamais écrites). Sans enable=1, un piston ne tire jamais, quels que soient les seuils — c'est ce qui a réveillé le NG." },
+                    new MaintenanceCommandDefinition { Command = "NG_STATION_ENABLE", Label = "Armer station NG (battement à chaque avance)", Register = "4X 28424", Code = "enable=1, maintenu", RequiresExpert = false, TerrainValidated = true, Warning = "Arme la station NG constructeur : enable 28424=1 laissé en place (la sortie 28936 n'est pas écrite). Validé terrain le 10 juin 2026 : le PLC bat le poussoir NG à chaque avance." },
+                    new MaintenanceCommandDefinition { Command = "NG_STATION_DISABLE", Label = "Désarmer station NG", Register = "4X 28424", Code = "enable=0", RequiresExpert = false, TerrainValidated = false, Warning = "Coupe l'enable 28424 de la station NG." },
+                    new MaintenanceCommandDefinition { Command = "RELEASE_NG_PISTON", Label = "Libérer vérin NG", Register = "4X 28305", Code = "reset NG repos (=1)", RequiresExpert = false, TerrainValidated = true, Warning = "Relâche le reset NG constructeur 28305 à 1 si le vérin NG est resté sorti. Les enables/sorties 28424/28936 ne sont pas écrits." },
+                    new MaintenanceCommandDefinition { Command = "DIAG_PULSE_NG", Label = "Diagnostic sortie Y11 (carte)", Register = "4X 3144 bit 10", Code = "ON 1500 ms puis OFF", RequiresExpert = false, TerrainValidated = true, Warning = "Pulse la sortie carte Y11 machine arrêtée pour observer la LED Y. Ce n'est pas le vérin NG : pour tester le vérin NG, utiliser le test piston NG (28424/28936)." },
+                    new MaintenanceCommandDefinition { Command = "START", Label = "Démarrer machine", Register = "5978", Code = "31 écrit une fois (le PLC consomme)", RequiresExpert = false, TerrainValidated = true, Warning = string.Empty },
+                    new MaintenanceCommandDefinition { Command = "RESET", Label = "Réarmer automate", Register = "5978", Code = "26 écrit une fois (le PLC consomme)", RequiresExpert = false, TerrainValidated = true, Warning = "Commande opérateur volontaire. À utiliser seulement si le statut 7 empêche de redémarrer; aucun registre piston n'est écrit." },
+                    new MaintenanceCommandDefinition { Command = "STOP", Label = "Arrêter machine", Register = "5978", Code = "29 écrit une fois (le PLC consomme)", RequiresExpert = false, TerrainValidated = true, Warning = string.Empty },
+                    new MaintenanceCommandDefinition { Command = "PAUSE", Label = "Pause machine", Register = "5978", Code = "32 écrit une fois (le PLC consomme)", RequiresExpert = false, TerrainValidated = true, Warning = string.Empty }
                 },
                 ExpertCommands = new List<MaintenanceCommandDefinition>
                 {
+                    new MaintenanceCommandDefinition { Command = "START_RAW", Label = "Démarrage brut constructeur", Register = "5978", Code = "31 écrit une fois", RequiresExpert = true, TerrainValidated = false, Warning = "Diagnostic expert seulement : bloqué en réel pour éviter de contourner 8230, START_PRELOAD et le lot actif." },
+                    new MaintenanceCommandDefinition { Command = "Y11_OUTPUT_OFF", Label = "Y11 OFF", Register = "4X 3144 bit 10", Code = "bit=0", RequiresExpert = true, TerrainValidated = false, Warning = "Diagnostic brut sortie carte : modifie uniquement le bit Y11 après lecture 3144. À lancer machine arrêtée et zone dégagée." },
+                    new MaintenanceCommandDefinition { Command = "Y11_OUTPUT_ON", Label = "Y11 ON maintenu", Register = "4X 3144 bit 10", Code = "bit=1", RequiresExpert = true, TerrainValidated = false, Warning = "Bloqué en réel : utiliser Diagnostic sortie NG pour une impulsion ON/OFF validée, ou Y11 OFF pour libérer la sortie." }
                 }
             };
+        }
+
+        private static bool IsY11OutputImageBitSet(ushort value)
+        {
+            return (value & Y11OutputImageMask) != 0;
+        }
+
+        private bool TrySetY11OutputBitNoLock(MachineConfig cfg, bool active, out string detail)
+        {
+            detail = string.Empty;
+            if (cfg == null)
+            {
+                detail = "Configuration PLC indisponible : Y11 non modifie.";
+                return false;
+            }
+
+            if (cfg.UseSimulator)
+            {
+                detail = "Simulateur : Y11 bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) +
+                         "=" + (active ? "1" : "0") + ".";
+                return true;
+            }
+
+            ushort before;
+            if (!TryReadHoldingSingleNoLock(cfg, Y11OutputImageRegister, out before))
+            {
+                detail = "Lecture 4X " + Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture) +
+                         " refusee : aucune ecriture Y11 envoyee.";
+                return false;
+            }
+
+            var beforeBit = IsY11OutputImageBitSet(before);
+            var targetRegisterValue = active
+                ? (ushort)(before | Y11OutputImageMask)
+                : (ushort)(before & Y11OutputImageClearMask);
+            var writeOk = WriteHoldingSingleNoLock(cfg, Y11OutputImageRegister, targetRegisterValue);
+            Thread.Sleep(150);
+
+            ushort after;
+            var hasAfter = TryReadHoldingSingleNoLock(cfg, Y11OutputImageRegister, out after);
+            var afterBit = hasAfter && IsY11OutputImageBitSet(after);
+            detail = "3144 " + before.ToString(CultureInfo.InvariantCulture) +
+                     "->" + (hasAfter ? after.ToString(CultureInfo.InvariantCulture) : "--") +
+                     " ; Y11 bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) +
+                     " " + (beforeBit ? "1" : "0") +
+                     "->" + (hasAfter ? (afterBit ? "1" : "0") : "--") +
+                     " ; cible=" + (active ? "1" : "0") + ".";
+            return writeOk && hasAfter && afterBit == active;
+        }
+
+        private bool PulseY11OutputBitNoLock(MachineConfig cfg, string traceCategory, string traceAction, string source, string context, int pulseMs, out string pulseDetail)
+        {
+            string preDetail;
+            var preReleaseOk = TrySetY11OutputBitNoLock(cfg, false, out preDetail);
+            _trace.Append(
+                traceCategory,
+                traceAction,
+                preReleaseOk ? "Y11_PRE_RELEASE" : "Y11_PRE_RELEASE_ERROR",
+                source,
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=0",
+                context + " pre-release Y11 OFF. " + preDetail
+            );
+
+            string onDetail = string.Empty;
+            var onOk = false;
+            if (preReleaseOk)
+            {
+                Thread.Sleep(PusherEnableSettleMs);
+                onOk = TrySetY11OutputBitNoLock(cfg, true, out onDetail);
+            }
+            _trace.Append(
+                traceCategory,
+                traceAction,
+                onOk ? "Y11_ON" : "Y11_ON_ERROR",
+                source,
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=1",
+                context + " Y11 ON pendant " + pulseMs.ToString(CultureInfo.InvariantCulture) + " ms. " + onDetail
+            );
+
+            if (onOk)
+            {
+                Thread.Sleep(pulseMs);
+            }
+
+            var releaseOk = false;
+            var releaseDetail = string.Empty;
+            for (var retry = 0; retry < 3 && !releaseOk; retry++)
+            {
+                if (retry > 0)
+                {
+                    Thread.Sleep(50);
+                }
+                releaseOk = TrySetY11OutputBitNoLock(cfg, false, out releaseDetail);
+            }
+            _trace.Append(
+                traceCategory,
+                traceAction,
+                releaseOk ? "Y11_OFF" : "Y11_OFF_ERROR",
+                source,
+                Y11OutputImageRegister.ToString(CultureInfo.InvariantCulture),
+                "bit " + Y11OutputImageBit.ToString(CultureInfo.InvariantCulture) + "=0",
+                context + " relachement Y11 OFF. " + releaseDetail
+            );
+
+            pulseDetail = "Y11 4X 3144 bit 10 pre=[" + preDetail + "] on=[" + onDetail + "] off=[" + releaseDetail + "]";
+            return preReleaseOk && onOk && releaseOk;
         }
 
         private MachineSpeedState BuildMachineSpeedStateNoLock()
@@ -3352,6 +3376,33 @@ namespace SortingMachineDesktop
                 Available = _machineSpeedAvailable,
                 Source = _config.UseSimulator ? "SIMULATEUR" : (_machineSpeedAvailable ? "PLC" : "INDISPONIBLE")
             };
+        }
+
+        public void Shutdown()
+        {
+            // Libere le port serie pour qu'aucun process ne garde l'automate apres fermeture.
+            _modbus.Close();
+        }
+
+        private void UpdateMachineSwitchesNoLock(int? value)
+        {
+            if (_machineSwitchesValue == value)
+            {
+                return;
+            }
+
+            _machineSwitchesValue = value;
+            _trace.Append(
+                "MAINTENANCE",
+                "MACHINE_SWITCHES",
+                value.HasValue ? "READ" : "UNAVAILABLE",
+                "PLC",
+                MachineSwitchesRegister.ToString(CultureInfo.InvariantCulture),
+                value.HasValue ? value.Value.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                value.HasValue
+                    ? "Réglages constructeur 640 (bit0=réarmement auto à la mise sous tension, bit2=scan): valeur " + value.Value.ToString(CultureInfo.InvariantCulture) + "."
+                    : "Réglages constructeur 640 illisibles."
+            );
         }
 
         private void UpdateMachineSpeedModeNoLock(int? mode, bool available)
@@ -3434,6 +3485,23 @@ namespace SortingMachineDesktop
                 speedModeRead = true;
                 _lastSpeedRead = now;
             }
+            int? machineSwitchesValue = null;
+            var machineSwitchesRead = false;
+            if ((now - _lastSwitchesRead).TotalMilliseconds >= 2000)
+            {
+                machineSwitchesValue = TryReadSingleRegister(cfg, MachineSwitchesRegister, notes, "Interrupteurs machine 640");
+                machineSwitchesRead = true;
+                _lastSwitchesRead = now;
+            }
+            if ((now - _lastEnablesRead).TotalMilliseconds >= 5000)
+            {
+                ushort[] enablesSnapshot;
+                if (TryReadRegisters(cfg, PusherCylinderEnableBaseRegister, NgCounterIndex + 1, out enablesSnapshot, notes, "Enables stations pistons 28414+"))
+                {
+                    _pusherEnablesSnapshot = enablesSnapshot;
+                }
+                _lastEnablesRead = now;
+            }
             var acceptedNewCycle = false;
             if (handshakeValue.HasValue)
             {
@@ -3463,14 +3531,40 @@ namespace SortingMachineDesktop
                     UpdateMachineSpeedModeNoLock(speedModeValue, speedModeValue.HasValue);
                 }
             }
+            if (machineSwitchesRead)
+            {
+                lock (_lock)
+                {
+                    UpdateMachineSwitchesNoLock(machineSwitchesValue);
+                }
+            }
 
             if (!cfg.UseSimulator && (now - _lastNgPusherReleaseCheck).TotalMilliseconds >= NgPusherReleaseCheckIntervalMs)
             {
                 _lastNgPusherReleaseCheck = now;
-                var ngRelease = ReleaseNgPusherResetNoLock(cfg, "AUTO_NG_RELEASE", "PLC", false);
-                if (!ngRelease.CommandReleased || !ngRelease.FeedbackReleased)
+                if (IsNgAutoReleaseBlockedByRunStateNoLock())
                 {
-                    notes.Add(ngRelease.Message);
+                    if ((now - _lastNgAutoReleaseSkippedTrace).TotalSeconds >= 30)
+                    {
+                        _lastNgAutoReleaseSkippedTrace = now;
+                        _trace.Append(
+                            "MAINTENANCE",
+                            "AUTO_NG_RELEASE",
+                            "SKIPPED_RUN",
+                            "LOCAL",
+                            cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                            _lastRecordedHandshake.HasValue ? _lastRecordedHandshake.Value.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                            "Libération automatique NG ignorée pendant cycle armé. START et Libérer vérin NG restent les chemins explicites pour 28305=1."
+                        );
+                    }
+                }
+                else
+                {
+                    var ngRelease = ReleaseNgPusherResetNoLock(cfg, "AUTO_NG_RELEASE", "PLC", false);
+                    if (!ngRelease.CommandReleased || !ngRelease.FeedbackReleased)
+                    {
+                        notes.Add(ngRelease.Message);
+                    }
                 }
             }
 
@@ -3538,15 +3632,30 @@ namespace SortingMachineDesktop
             {
                 lock (_lock)
                 {
-                _connected = false;
-                _alarmsActive = alarms;
-                _lastLaneFullSignalState = false;
-                LogAlarmChangesNoLock(alarms, "PLC");
-                _diagnostic = BuildDiagnostic(cfg, handshakeValue, statusValue, measurementRegs, displayRegs, alarmRegs, observedThresholds, localThresholds, notes, "Lecture PLC indisponible");
-            }
+                    _connected = false;
+                    _alarmsActive = alarms;
+                    _lastLaneFullSignalState = false;
+                    LogAlarmChangesNoLock(alarms, "PLC");
+
+                    if (acceptedNewCycle)
+                    {
+                        _trace.Append(
+                            "DECISION",
+                            "RAW_CYCLE_ONLY",
+                            "MEASURE_UNAVAILABLE",
+                            "PLC",
+                            handshakeValue.HasValue ? cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                            "HS=" + (handshakeValue.HasValue ? handshakeValue.Value.ToString(CultureInfo.InvariantCulture) : "--"),
+                            "Top 8230 accepte mais lecture mesures indisponible; NG gere par le PLC via la voie catch-all." +
+                            " routing_control=PLC_THRESHOLDS_NG_CATCHALL"
+                        );
+                    }
+
+                    _diagnostic = BuildDiagnostic(cfg, handshakeValue, statusValue, measurementRegs, displayRegs, alarmRegs, observedThresholds, localThresholds, notes, "Lecture PLC indisponible");
+                }
                 if (_lastConnectedLoggedState != false)
                 {
-                _trace.Append("PLC", "READ", "OFFLINE", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), string.Empty, "Lecture des mesures indisponible.");
+                    _trace.Append("PLC", "READ", "OFFLINE", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), string.Empty, "Lecture des mesures indisponible.");
                     _lastConnectedLoggedState = false;
                 }
                 return;
@@ -3556,6 +3665,7 @@ namespace SortingMachineDesktop
             {
                 _trace.Append("PLC", "READ", "ONLINE", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), string.Empty, "Lecture PLC disponible.");
                 _lastConnectedLoggedState = true;
+                TrySendConstructorConnectInitNoLock(cfg);
             }
 
             string measurementDecodeNote;
@@ -3573,16 +3683,17 @@ namespace SortingMachineDesktop
             }
             if (!measurementAvailable)
             {
-                var rejectNote = "Mesure 8408 rejetée : hors plage plausible (rawV=" +
+                var measurementRegisterText = cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture);
+                var rejectNote = "Mesure " + measurementRegisterText + " rejetée : hors plage plausible (rawV=" +
                                  rawVoltage.ToString("0.0000", CultureInfo.InvariantCulture) +
                                  " rawIR=" + rawIr.ToString("0.000", CultureInfo.InvariantCulture) + ").";
                 notes.Add(rejectNote);
                 _trace.Append(
                     "MEASURE",
-                    "8408",
+                    measurementRegisterText,
                     "REJECTED",
                     "PLC",
-                    "8408",
+                    measurementRegisterText,
                     "rawV=" + rawVoltage.ToString("0.0000", CultureInfo.InvariantCulture) +
                     " rawIR=" + rawIr.ToString("0.000", CultureInfo.InvariantCulture),
                     rejectNote
@@ -3594,7 +3705,7 @@ namespace SortingMachineDesktop
                 notes.Add(absNote);
                 if (acceptedNewCycle)
                 {
-                    _trace.Append("MEASURE", "VOLTAGE", "ABS_NORMALIZED", "PLC", "8408", "rawV=" + rawVoltage.ToString("0.0000", CultureInfo.InvariantCulture), absNote);
+                    _trace.Append("MEASURE", "VOLTAGE", "ABS_NORMALIZED", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), "rawV=" + rawVoltage.ToString("0.0000", CultureInfo.InvariantCulture), absNote);
                 }
             }
             if (measurementAvailable && rawIr != ir)
@@ -3603,7 +3714,7 @@ namespace SortingMachineDesktop
                 notes.Add(absNote);
                 if (acceptedNewCycle)
                 {
-                    _trace.Append("MEASURE", "IR", "ABS_NORMALIZED", "PLC", "8408", "rawIR=" + rawIr.ToString("0.000", CultureInfo.InvariantCulture), absNote);
+                    _trace.Append("MEASURE", "IR", "ABS_NORMALIZED", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), "rawIR=" + rawIr.ToString("0.000", CultureInfo.InvariantCulture), absNote);
                 }
             }
             var barcode = GetBarcode(cfg);
@@ -3621,7 +3732,7 @@ namespace SortingMachineDesktop
             }
 
             var barcode = cfg.ScanEnabled ? "SIM-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) : null;
-            var handshake = _lastHandshakeValue.HasValue ? _lastHandshakeValue.Value + 1 : 1;
+            var handshake = cfg.ScanEnabled ? 1 : (_lastHandshakeValue.HasValue ? _lastHandshakeValue.Value + 1 : 1);
             UpdateHandshake(handshake);
             lock (_lock)
             {
@@ -3697,6 +3808,13 @@ namespace SortingMachineDesktop
             var laneFullSignal = false;
             var machineBlocked = false;
             var laneFullSignalHandled = false;
+            var pusherScheduleAttempted = false;
+            var pusherScheduleOk = false;
+            var pusherScheduleLane = "--";
+            var pusherScheduleMode = "NONE";
+            var scannerFallbackResult = ResolveScannerFallbackResultNoLock(cfg, barcode);
+            var scannerFallbackApplied = false;
+            var scannerHandshakeResponseStatus = "NONE";
 
             var measurement = new CellMeasurement
             {
@@ -3778,7 +3896,18 @@ namespace SortingMachineDesktop
                         measurementAvailable,
                         out appliedThresholdSource);
                     var laneBeforeEvaluation = activeLot == null ? null : activeLot.CurrentGoodLane;
-                    if (cfg.SortingMode == SortingModes.IntelligentGoodNg)
+                    if (!string.IsNullOrWhiteSpace(scannerFallbackResult))
+                    {
+                        decision = BuildScannerFallbackDecisionNoLock(cfg, activeLot, scannerFallbackResult);
+                        scannerFallbackApplied = true;
+                        appliedChannel = "NG";
+                        appliedThresholdSource = "SCANNER_FALLBACK";
+                        if (cfg.SortingMode == SortingModes.IntelligentGoodNg)
+                        {
+                            ApplyScannerFallbackToIntelligentLotNoLock(activeLot, decision, measurement, source);
+                        }
+                    }
+                    else if (cfg.SortingMode == SortingModes.IntelligentGoodNg)
                     {
                         decision = _intelligentEngine.Evaluate(measurement, activeLot, CopyIntelligentRecipe(_intelligentRecipes[cfg.CellType]), _laneCapacityObservations);
                         if (measurement.MachineCountersAuthoritative)
@@ -3800,8 +3929,16 @@ namespace SortingMachineDesktop
                         if (cfg.SortingMode == SortingModes.IntelligentGoodNg)
                         {
                             var expectedChannel = ResolveDecisionRoutingChannelNoLock(decision);
-                            appliedChannel = ResolveEffectiveIntelligentRoutingChannelNoLock(cfg, activeLot, decision);
-                            appliedThresholdSource = BuildRoutingLedgerThresholdSourceNoLock(expectedChannel, appliedChannel);
+                            if (scannerFallbackApplied)
+                            {
+                                appliedChannel = "NG";
+                                appliedThresholdSource = "SCANNER_FALLBACK";
+                            }
+                            else
+                            {
+                                appliedChannel = ResolveEffectiveIntelligentRoutingChannelNoLock(cfg, activeLot, decision);
+                                appliedThresholdSource = BuildRoutingLedgerThresholdSourceNoLock(expectedChannel, appliedChannel);
+                            }
                             RegisterRoutingTicketNoLock(
                                 activeLot,
                                 measurement,
@@ -3936,7 +4073,9 @@ namespace SortingMachineDesktop
                 if (isNew && decision != null)
                 {
                     displayChannel = ResolveAppliedRoutingChannelNoLock(appliedChannel);
-                    result = IsGoodRoutingChannelNoLock(displayChannel) ? "GOOD" : "NG";
+                    result = string.Equals(decision.Decision, "CON", StringComparison.OrdinalIgnoreCase)
+                        ? "CON"
+                        : (IsGoodRoutingChannelNoLock(displayChannel) ? "GOOD" : "NG");
                     targetLane = decision.TargetLane;
                     rejectReason = decision.RejectReason;
                     learningStatus = decision.LearningStatus;
@@ -3958,6 +4097,12 @@ namespace SortingMachineDesktop
                 else if (!_lotControlEnabled && cfg.SortingMode == SortingModes.IntelligentGoodNg)
                 {
                     result = "ATTENTE START";
+                }
+
+                if (isNew && handshakeValue.HasValue)
+                {
+                    pusherScheduleLane = "NG";
+                    pusherScheduleMode = "PLC_NG_CATCHALL";
                 }
 
                 var displayVoltage = Math.Abs(voltage);
@@ -3987,6 +4132,17 @@ namespace SortingMachineDesktop
                 {
                     if (decision != null)
                     {
+                        scannerHandshakeResponseStatus = SendScannerHandshakeResponseNoLock(
+                            cfg,
+                            handshakeValue,
+                            barcode,
+                            scannerFallbackApplied,
+                            source);
+                        if (string.Equals(scannerHandshakeResponseStatus, "ERROR", StringComparison.OrdinalIgnoreCase) && activeLot != null)
+                        {
+                            activeLot.AlertMessage = "Réponse scan 8230 non envoyée : vérifier liaison PLC, sinon la machine peut attendre la réponse barcode.";
+                        }
+
                         _total++;
                         if (IsGoodRoutingChannelNoLock(displayChannel))
                         {
@@ -4063,9 +4219,12 @@ namespace SortingMachineDesktop
                             " threshold=" + appliedThresholdSource +
                             " learning=" + learningStatus +
                             " reject=" + rejectReason +
-                            " pusher=PLC_THRESHOLDS" +
+                            " pusher=" + (pusherScheduleAttempted ? (pusherScheduleOk ? "SCHEDULED" : "BLOCKED") : "NONE") +
+                            " pusher_lane=" + pusherScheduleLane +
+                            " pusher_mode=" + pusherScheduleMode +
+                            " scanner_response=" + scannerHandshakeResponseStatus +
                             FormatDecisionWindow(decision) +
-                            " routing_control=THRESHOLDS_MACHINE"
+                            " routing_control=PLC_THRESHOLDS_NG_CATCHALL"
                         );
 
                         PersistBusiness();
@@ -4171,7 +4330,7 @@ namespace SortingMachineDesktop
             notes.Add("Trace runtime: " + _trace.CsvPath);
             notes.Add(HasOdooLotAssociation(activeLot)
                 ? "Lot de cellules Odoo associé : les commandes cycle 5978 et les seuils 1188..1370 peuvent piloter la ligne GOOD active."
-                : "Lot de cellules Odoo non associé : DÉMARRER et programmation seuils 1188..1370 sont bloqués.");
+                : "Lot de cellules Odoo non associé : DÉMARRER reste possible avec traçabilité locale uniquement.");
             if (activeLot != null)
             {
                 notes.Add("Lot courant #" + activeLot.Id + " - " + activeLot.LearningStatus);
@@ -4180,6 +4339,8 @@ namespace SortingMachineDesktop
                     notes.Add("Ligne bonne courante: " + activeLot.CurrentGoodLane);
                 }
             }
+
+            var physicalRouting = BuildPhysicalRoutingDiagnosticNoLock(cfg, activeLot, expectedThresholds, observedThresholds, thresholdStatus, statusValue, alarmRegs);
 
             return new DiagnosticSnapshot
             {
@@ -4199,9 +4360,794 @@ namespace SortingMachineDesktop
                 ThresholdsObserved = observedThresholds != null,
                 ThresholdStatus = thresholdStatus,
                 ThresholdDifferences = differences,
+                PhysicalRouting = physicalRouting,
+                StartReadiness = BuildStartReadinessDiagnosticNoLock(cfg, activeLot, physicalRouting, differences, thresholdStatus, handshakeValue, statusValue),
+                FieldValidation = BuildFieldValidationDiagnosticNoLock(activeLot),
                 ObservationEventCount = _observations.Count,
                 Notes = new List<string>(notes)
             };
+        }
+
+        private FieldValidationDiagnostic BuildFieldValidationDiagnosticNoLock(LotSession activeLot)
+        {
+            var currentLotId = activeLot == null ? (int?)null : activeLot.Id;
+            var result = new FieldValidationDiagnostic
+            {
+                HasReport = false,
+                Verified = false,
+                Status = "NO_REPORT",
+                ReportPath = null,
+                ReportTimestamp = null,
+                ReportLotId = null,
+                CurrentLotId = currentLotId,
+                MatchesCurrentLot = false,
+                TraceVerdict = "UNKNOWN",
+                CounterVerdict = "UNKNOWN",
+                PhysicalObservationVerdict = "UNKNOWN",
+                LaneCoverageVerdict = "UNKNOWN",
+                Summary = "Aucun rapport terrain operateur trouve. Lancer validate_tricell_field.bat avant l'essai physique.",
+                ValidationCommand = "validate_tricell_field.bat 180",
+                CheckCommand = "check_tricell_field_result.bat",
+                MissingReasons = new List<string> { "Rapport terrain operateur absent." }
+            };
+
+            try
+            {
+                var dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
+                if (!Directory.Exists(dataDir))
+                {
+                    return result;
+                }
+
+                FileInfo latest = null;
+                foreach (var file in new DirectoryInfo(dataDir).GetFiles("field_validation*.md"))
+                {
+                    if (file.Name.StartsWith("field_validation_codex", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (latest == null || file.LastWriteTime > latest.LastWriteTime)
+                    {
+                        latest = file;
+                    }
+                }
+
+                if (latest == null)
+                {
+                    return result;
+                }
+
+                var text = File.ReadAllText(latest.FullName, Encoding.UTF8);
+                var traceVerdict = ExtractValidationVerdict(text, "VERDICT_TRACE_LOGICIEL");
+                var counterVerdict = ExtractValidationVerdict(text, "VERDICT_COMPTEURS_MACHINE");
+                var physicalVerdict = ExtractValidationVerdict(text, "VERDICT_OBSERVATION_PHYSIQUE");
+                var laneCoverageVerdict = ExtractValidationVerdict(text, "VERDICT_COUVERTURE_VOIES_GOOD");
+                var laneCoverageDetailsOk = HasValidLaneCoverageDetails(text);
+                var reportLotId = ExtractValidationReportLotId(text);
+                var matchesCurrentLot = reportLotId.HasValue &&
+                    currentLotId.HasValue &&
+                    reportLotId.Value == currentLotId.Value;
+                var hasCompleteConclusion = ContainsIgnoreCase(text, "Preuve terrain complete");
+                var verified = string.Equals(traceVerdict, "OK", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(counterVerdict, "OK", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(physicalVerdict, "OK", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(laneCoverageVerdict, "OK", StringComparison.OrdinalIgnoreCase) &&
+                    laneCoverageDetailsOk &&
+                    matchesCurrentLot &&
+                    hasCompleteConclusion;
+
+                var missing = new List<string>();
+                if (!string.Equals(traceVerdict, "OK", StringComparison.OrdinalIgnoreCase))
+                {
+                    missing.Add("Trace logiciel terrain incomplete.");
+                }
+                if (!string.Equals(counterVerdict, "OK", StringComparison.OrdinalIgnoreCase))
+                {
+                    missing.Add("Delta compteurs machine insuffisant.");
+                }
+                if (!string.Equals(physicalVerdict, "OK", StringComparison.OrdinalIgnoreCase))
+                {
+                    missing.Add("Observation physique operateur incomplete.");
+                }
+                if (!string.Equals(laneCoverageVerdict, "OK", StringComparison.OrdinalIgnoreCase))
+                {
+                    missing.Add("Couverture terrain des lignes GOOD 1-9 incomplete.");
+                }
+                else if (!laneCoverageDetailsOk)
+                {
+                    missing.Add("Detail de couverture voies GOOD incoherent ou incomplet.");
+                }
+                if (!hasCompleteConclusion)
+                {
+                    missing.Add("Conclusion de preuve terrain complete absente.");
+                }
+                if (!reportLotId.HasValue)
+                {
+                    missing.Add("Lot du rapport terrain introuvable.");
+                }
+                else if (!matchesCurrentLot)
+                {
+                    missing.Add("Rapport terrain hors lot courant.");
+                }
+
+                result.HasReport = true;
+                result.Verified = verified;
+                result.Status = verified ? "COMPLETE" : "INCOMPLETE";
+                result.ReportPath = latest.FullName;
+                result.ReportTimestamp = latest.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                result.ReportLotId = reportLotId;
+                result.CurrentLotId = currentLotId;
+                result.MatchesCurrentLot = matchesCurrentLot;
+                result.TraceVerdict = string.IsNullOrWhiteSpace(traceVerdict) ? "UNKNOWN" : traceVerdict;
+                result.CounterVerdict = string.IsNullOrWhiteSpace(counterVerdict) ? "UNKNOWN" : counterVerdict;
+                result.PhysicalObservationVerdict = string.IsNullOrWhiteSpace(physicalVerdict) ? "UNKNOWN" : physicalVerdict;
+                result.LaneCoverageVerdict = string.IsNullOrWhiteSpace(laneCoverageVerdict) ? "UNKNOWN" : laneCoverageVerdict;
+                result.Summary = verified
+                    ? "Rapport terrain valide: traces, compteurs, observations physiques et couverture lignes GOOD sont OK."
+                    : "Rapport terrain present mais incomplet. Lancer check_tricell_field_result.bat pour le detail.";
+                result.MissingReasons = missing;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                result.Status = "ERROR";
+                result.Summary = "Lecture du rapport terrain impossible: " + ex.Message;
+                result.MissingReasons = new List<string> { result.Summary };
+                return result;
+            }
+        }
+
+        private static string ExtractValidationVerdict(string text, string name)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(name))
+            {
+                return "UNKNOWN";
+            }
+
+            var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            foreach (var rawLine in lines)
+            {
+                var line = string.IsNullOrWhiteSpace(rawLine) ? string.Empty : rawLine.Trim();
+                if (line.StartsWith("-", StringComparison.Ordinal))
+                {
+                    line = line.Substring(1).Trim();
+                }
+
+                if (!line.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var colon = line.IndexOf(':');
+                if (colon >= 0 && colon + 1 < line.Length)
+                {
+                    return line.Substring(colon + 1).Trim().ToUpperInvariant();
+                }
+            }
+
+            return "UNKNOWN";
+        }
+
+        private static int? ExtractValidationReportLotId(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            foreach (var rawLine in lines)
+            {
+                var line = string.IsNullOrWhiteSpace(rawLine) ? string.Empty : rawLine.Trim();
+                var marker = "Lot: #";
+                var markerIndex = line.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (markerIndex < 0)
+                {
+                    continue;
+                }
+
+                var start = markerIndex + marker.Length;
+                var end = start;
+                while (end < line.Length && char.IsDigit(line[end]))
+                {
+                    end++;
+                }
+
+                int lotId;
+                if (end > start &&
+                    int.TryParse(line.Substring(start, end - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out lotId))
+                {
+                    return lotId;
+                }
+            }
+
+            return null;
+        }
+
+        private static bool HasValidLaneCoverageDetails(string text)
+        {
+            var required = ExtractValidationLaneList(text, "Couverture voies GOOD requise");
+            var observed = ExtractValidationLaneList(text, "Couverture voies GOOD observee");
+            var missing = ExtractValidationLaneList(text, "Couverture voies GOOD manquante");
+            if (required.Count == 0 || observed.Count == 0 || missing.Count > 0)
+            {
+                return false;
+            }
+
+            var observedSet = new HashSet<string>(observed, StringComparer.OrdinalIgnoreCase);
+            foreach (var lane in required)
+            {
+                if (!observedSet.Contains(lane))
+                {
+                    return false;
+                }
+            }
+
+            return ValidationMinimumsCoverRequiredLaneCount(text, required.Count);
+        }
+
+        private static List<string> ExtractValidationLaneList(string text, string label)
+        {
+            var value = ExtractValidationLineValue(text, label);
+            if (string.IsNullOrWhiteSpace(value) ||
+                string.Equals(value.Trim(), "aucune", StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<string>();
+            }
+
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var parts = value.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var rawPart in parts)
+            {
+                var lane = (rawPart ?? string.Empty).Trim().ToUpperInvariant();
+                if (lane.StartsWith("L", StringComparison.OrdinalIgnoreCase) && lane.Length > 1)
+                {
+                    lane = lane.Substring(1);
+                }
+
+                if (string.IsNullOrWhiteSpace(lane) || string.Equals(lane, "NG", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (seen.Add(lane))
+                {
+                    result.Add(lane);
+                }
+            }
+
+            return result;
+        }
+
+        private static string ExtractValidationLineValue(string text, string label)
+        {
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(label))
+            {
+                return string.Empty;
+            }
+
+            var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            foreach (var rawLine in lines)
+            {
+                var line = string.IsNullOrWhiteSpace(rawLine) ? string.Empty : rawLine.Trim();
+                if (line.StartsWith("-", StringComparison.Ordinal))
+                {
+                    line = line.Substring(1).Trim();
+                }
+
+                if (!line.StartsWith(label, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var colon = line.IndexOf(':');
+                if (colon >= 0 && colon + 1 < line.Length)
+                {
+                    return line.Substring(colon + 1).Trim();
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static bool ValidationMinimumsCoverRequiredLaneCount(string text, int requiredLaneCount)
+        {
+            if (requiredLaneCount <= 0 || string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            var lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            foreach (var rawLine in lines)
+            {
+                var line = rawLine ?? string.Empty;
+                if (line.IndexOf("Minimums effectifs:", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                int tops;
+                int counters;
+                int observations;
+                return TryExtractIntAfter(line, "tops=", out tops) &&
+                    TryExtractIntAfter(line, "compteurs=", out counters) &&
+                    TryExtractIntAfter(line, "observations=", out observations) &&
+                    tops >= requiredLaneCount &&
+                    counters >= requiredLaneCount &&
+                    observations >= requiredLaneCount;
+            }
+
+            return false;
+        }
+
+        private static bool TryExtractIntAfter(string text, string marker, out int value)
+        {
+            value = 0;
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(marker))
+            {
+                return false;
+            }
+
+            var markerIndex = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (markerIndex < 0)
+            {
+                return false;
+            }
+
+            var start = markerIndex + marker.Length;
+            var end = start;
+            while (end < text.Length && char.IsDigit(text[end]))
+            {
+                end++;
+            }
+
+            return end > start &&
+                int.TryParse(text.Substring(start, end - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+
+        private StartReadinessDiagnostic BuildStartReadinessDiagnosticNoLock(
+            MachineConfig cfg,
+            LotSession activeLot,
+            PhysicalRoutingDiagnostic physicalRouting,
+            List<ThresholdDifference> thresholdDifferences,
+            string thresholdStatus,
+            int? handshakeValue,
+            int? statusValue)
+        {
+            var blockingReasons = new List<string>();
+            var warnings = new List<string>();
+            var operatorChecks = new List<string>
+            {
+                "Zone machine dégagée et capots/sécurités contrôlés.",
+                "Cellule factice ou lot test en place, pas de production utile.",
+                "Observer le poussoir 11/NG pousser puis revenir sur chaque cellule non triée GOOD (PLC, voie 11 catch-all).",
+                "Comparer au moins 9 cellules: IR, ligne attendue, ligne physique observée, voies GOOD 1-9 couvertes."
+            };
+
+            var lotAssociated = HasOdooLotAssociation(activeLot);
+            var requiresIntelligentModel = cfg != null &&
+                string.Equals(cfg.SortingMode, SortingModes.IntelligentGoodNg, StringComparison.OrdinalIgnoreCase);
+            var modelStable = !requiresIntelligentModel ||
+                (activeLot != null &&
+                    string.Equals(activeLot.LearningStatus, LearningStatuses.Stable, StringComparison.OrdinalIgnoreCase) &&
+                    activeLot.Reference != null);
+            var thresholdsSynchronized = thresholdDifferences != null &&
+                thresholdDifferences.Count == 0 &&
+                physicalRouting != null &&
+                physicalRouting.ObservedThresholds != null;
+            var thresholdsCanBePreloaded = CanPreloadThresholdsBeforeStartNoLock(cfg);
+            var machineRequiresReset = statusValue.HasValue && statusValue.Value == ResetRequiredStatusCode;
+            var blockingAlarm = IsBlockingAlarmActive(_alarmsActive, false);
+            var handshakeReady = cfg != null && (cfg.UseSimulator || handshakeValue.HasValue);
+
+            if (cfg == null)
+            {
+                blockingReasons.Add("Configuration machine indisponible.");
+            }
+            else
+            {
+                if (cfg.UseSimulator)
+                {
+                    warnings.Add("Mode simulateur actif: ce pré-vol ne prouve pas le tri physique.");
+                }
+
+                if (cfg.ObservationOnly)
+                {
+                    blockingReasons.Add("ObservationOnly actif: aucune commande machine ne sera envoyée.");
+                }
+            }
+
+            if (!_connected && (cfg == null || !cfg.UseSimulator))
+            {
+                blockingReasons.Add("PLC non connecté ou lecture mesure indisponible.");
+            }
+
+            if (!handshakeReady)
+            {
+                blockingReasons.Add("Top automate 8230 non lu: DÉMARRER relira 8230 et refusera le départ si la valeur reste indisponible.");
+            }
+
+            if (!lotAssociated)
+            {
+                warnings.Add("Aucun lot Odoo vérifié associé: traçabilité locale uniquement.");
+            }
+
+            if (requiresIntelligentModel && !modelStable)
+            {
+                warnings.Add("Modèle en apprentissage: START_PRELOAD utilisera la ligne 10 jusqu'à stabilisation, puis les lignes GOOD 1-9.");
+            }
+
+            if (!thresholdsSynchronized)
+            {
+                var preloadMessage = string.IsNullOrWhiteSpace(thresholdStatus)
+                    ? "Seuils machine non confirmés."
+                    : thresholdStatus;
+                if (thresholdsCanBePreloaded)
+                {
+                    warnings.Add(preloadMessage + " START_PRELOAD reprogrammera 1188..1370 avant 5978=31.");
+                }
+                else
+                {
+                    blockingReasons.Add(preloadMessage + " Aucun jeu de seuils local programmable n'est disponible pour START_PRELOAD.");
+                }
+            }
+
+            if (machineRequiresReset)
+            {
+                blockingReasons.Add("Statut machine 7: réarmement opérateur requis avant DÉMARRER.");
+            }
+
+            if (blockingAlarm)
+            {
+                blockingReasons.Add("Alarme bloquante active: " + BuildAlarmSummary(_alarmsActive) + ".");
+            }
+            else
+            {
+                var alarmSummary = BuildAlarmSummary(_alarmsActive);
+                if (!string.IsNullOrWhiteSpace(alarmSummary) &&
+                    !string.Equals(alarmSummary, "Aucune", StringComparison.OrdinalIgnoreCase))
+                {
+                    warnings.Add("Alarme non bloquante visible: " + alarmSummary + ".");
+                }
+            }
+
+            if (activeLot != null && activeLot.PauseRequested)
+            {
+                warnings.Add("Lot en pause: DÉMARRER reprendra le lot courant après préchargement seuils.");
+            }
+
+            if (_pusherEnablesSnapshot != null && _pusherEnablesSnapshot.Length > NgCounterIndex)
+            {
+                var disarmed = new List<string>();
+                for (var index = 0; index <= NgCounterIndex; index++)
+                {
+                    if (_pusherEnablesSnapshot[index] == 0)
+                    {
+                        disarmed.Add(index == NgCounterIndex ? "NG" : (index + 1).ToString(CultureInfo.InvariantCulture));
+                    }
+                }
+
+                if (disarmed.Count > 0)
+                {
+                    warnings.Add("Stations pistons désarmées (enable=0) : " + string.Join(",", disarmed.ToArray()) + ". Ces pistons ne tireront pas : utiliser 'Armer toutes les stations pistons' en Maintenance.");
+                }
+            }
+
+            return new StartReadinessDiagnostic
+            {
+                ReadyToStart = blockingReasons.Count == 0,
+                Connected = _connected || (cfg != null && cfg.UseSimulator),
+                HandshakeReady = handshakeReady,
+                HandshakeRegister = cfg == null ? 0 : cfg.HandshakeRegister,
+                HandshakeValue = handshakeValue,
+                HandshakeChangedAt = _lastHandshakeChange == DateTime.MinValue ? null : _lastHandshakeChange.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                LotAssociated = lotAssociated,
+                ModelStable = modelStable,
+                ThresholdsSynchronized = thresholdsSynchronized,
+                MachineRequiresReset = machineRequiresReset,
+                BlockingAlarmActive = blockingAlarm,
+                OperatorConfirmationRequired = true,
+                MachineStatus = statusValue,
+                LotStatus = activeLot == null ? "NO_LOT" : (activeLot.PauseRequested ? "PAUSED" : "ACTIVE"),
+                ExpectedLane = physicalRouting == null ? null : physicalRouting.ExpectedLane,
+                AppliedLane = physicalRouting == null ? null : physicalRouting.AppliedLane,
+                BlockingReasons = blockingReasons,
+                Warnings = warnings,
+                OperatorChecks = operatorChecks
+            };
+        }
+
+        private bool CanPreloadThresholdsBeforeStartNoLock(MachineConfig cfg)
+        {
+            if (cfg == null)
+            {
+                return false;
+            }
+
+            if (cfg.UseSimulator)
+            {
+                return true;
+            }
+
+            if (_thresholds == null || !_thresholds.ContainsKey(cfg.CellType))
+            {
+                return false;
+            }
+
+            if (string.Equals(cfg.SortingMode, SortingModes.IntelligentGoodNg, StringComparison.OrdinalIgnoreCase) &&
+                (_intelligentRecipes == null || !_intelligentRecipes.ContainsKey(cfg.CellType)))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private PhysicalRoutingDiagnostic BuildPhysicalRoutingDiagnosticNoLock(
+            MachineConfig cfg,
+            LotSession activeLot,
+            ThresholdSet programmedThresholds,
+            ThresholdSet observedThresholds,
+            string thresholdStatus,
+            int? statusValue,
+            ushort[] alarmRegs)
+        {
+            var lastTicket = FindLastRoutingTicketNoLock(activeLot);
+            var expectedLane = ResolveDiagnosticExpectedLaneNoLock(activeLot, lastTicket);
+            var appliedLane = ResolveDiagnosticAppliedLaneNoLock(lastTicket);
+            var confirmedLane = ResolveDiagnosticConfirmedLaneNoLock(lastTicket, appliedLane);
+
+            return new PhysicalRoutingDiagnostic
+            {
+                ExpectedLane = expectedLane,
+                AppliedLane = appliedLane,
+                ConfirmedLane = confirmedLane,
+                HandshakeRegister = cfg.HandshakeRegister,
+                LastHandshake = _lastHandshakeValue,
+                StatusRegister = cfg.StatusRegister,
+                MachineStatus = statusValue,
+                ThresholdStatus = thresholdStatus,
+                ProgrammedThresholds = CopyThresholds(programmedThresholds),
+                ObservedThresholds = observedThresholds == null ? null : CopyThresholds(observedThresholds),
+                AlarmRegisters = ToList(alarmRegs),
+                AlarmSummary = BuildAlarmSummary(_alarmsActive),
+                LastNgPulse = CopyNgPulseDiagnostic(_lastNgPulseDiagnostic),
+                PhysicalRoutingMode = "PLC_THRESHOLDS_NG_CATCHALL",
+                GoodPusherDirectControlBlocked = true
+            };
+        }
+
+        private string ResolveDiagnosticExpectedLaneNoLock(LotSession activeLot, RoutingTicket lastTicket)
+        {
+            if (lastTicket != null && !string.IsNullOrWhiteSpace(lastTicket.IntendedLane))
+            {
+                return ResolveAppliedRoutingChannelNoLock(lastTicket.IntendedLane);
+            }
+
+            if (_live != null && !string.IsNullOrWhiteSpace(_live.TargetLane))
+            {
+                return ResolveAppliedRoutingChannelNoLock(_live.TargetLane);
+            }
+
+            if (activeLot != null && !string.IsNullOrWhiteSpace(activeLot.CurrentGoodLane))
+            {
+                return ResolveAppliedRoutingChannelNoLock(activeLot.CurrentGoodLane);
+            }
+
+            return string.IsNullOrWhiteSpace(_programmedRoutingLaneId) ? "NG" : _programmedRoutingLaneId;
+        }
+
+        private string ResolveDiagnosticAppliedLaneNoLock(RoutingTicket lastTicket)
+        {
+            if (lastTicket != null && !string.IsNullOrWhiteSpace(lastTicket.EffectiveLane))
+            {
+                return ResolveAppliedRoutingChannelNoLock(lastTicket.EffectiveLane);
+            }
+
+            if (!string.IsNullOrWhiteSpace(_programmedRoutingLaneId))
+            {
+                return ResolveAppliedRoutingChannelNoLock(_programmedRoutingLaneId);
+            }
+
+            if (_live != null && !string.IsNullOrWhiteSpace(_live.Channel))
+            {
+                return ResolveAppliedRoutingChannelNoLock(_live.Channel);
+            }
+
+            return "NG";
+        }
+
+        private string ResolveDiagnosticConfirmedLaneNoLock(RoutingTicket lastTicket, string appliedLane)
+        {
+            if (lastTicket == null)
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastTicket.ConfirmationLane))
+            {
+                return ResolveAppliedRoutingChannelNoLock(lastTicket.ConfirmationLane);
+            }
+
+            if (string.Equals(lastTicket.Status, RoutingTicketStatuses.Confirmed, StringComparison.OrdinalIgnoreCase))
+            {
+                return appliedLane;
+            }
+
+            return null;
+        }
+
+        private RoutingTicket FindLastRoutingTicketNoLock(LotSession lot)
+        {
+            if (lot == null)
+            {
+                return null;
+            }
+
+            RoutingTicket best = null;
+            if (lot.RoutingArchive != null)
+            {
+                foreach (var ticket in lot.RoutingArchive)
+                {
+                    best = ChooseLaterRoutingTicket(best, ticket);
+                }
+            }
+
+            if (lot.RoutingLedger != null && lot.RoutingLedger.Tickets != null)
+            {
+                foreach (var ticket in lot.RoutingLedger.Tickets)
+                {
+                    best = ChooseLaterRoutingTicket(best, ticket);
+                }
+            }
+
+            return best;
+        }
+
+        private static RoutingTicket ChooseLaterRoutingTicket(RoutingTicket current, RoutingTicket candidate)
+        {
+            if (candidate == null)
+            {
+                return current;
+            }
+
+            if (current == null || candidate.Sequence >= current.Sequence)
+            {
+                return candidate;
+            }
+
+            return current;
+        }
+
+        private static string ResolveScannerFallbackResultNoLock(MachineConfig cfg, string barcode)
+        {
+            if (cfg == null || !cfg.ScanEnabled)
+            {
+                return null;
+            }
+
+            var fallback = NormalizeScannerValue(cfg.NoBarcodeValue);
+            if (string.IsNullOrWhiteSpace(fallback))
+            {
+                fallback = "NG";
+            }
+
+            var normalizedBarcode = NormalizeScannerValue(barcode);
+            if (!string.IsNullOrWhiteSpace(normalizedBarcode) &&
+                !string.Equals(normalizedBarcode, fallback, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return string.Equals(fallback, "CON", StringComparison.OrdinalIgnoreCase) ? "CON" : "NG";
+        }
+
+        private static string NormalizeScannerValue(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().ToUpperInvariant();
+        }
+
+        private static CellDecision BuildScannerFallbackDecisionNoLock(MachineConfig cfg, LotSession lot, string scannerFallbackResult)
+        {
+            var result = string.Equals(scannerFallbackResult, "CON", StringComparison.OrdinalIgnoreCase) ? "CON" : "NG";
+            return new CellDecision
+            {
+                SortingMode = cfg == null ? SortingModes.IntelligentGoodNg : cfg.SortingMode,
+                Decision = result,
+                TargetLane = "NG",
+                RejectReason = string.Equals(result, "CON", StringComparison.OrdinalIgnoreCase)
+                    ? RejectReasons.ScannerNoBarcodeCon
+                    : RejectReasons.ScannerNoBarcodeNg,
+                LearningStatus = lot == null ? LearningStatuses.Idle : lot.LearningStatus,
+                PauseRequested = false,
+                AlertMessage = string.Equals(result, "CON", StringComparison.OrdinalIgnoreCase)
+                    ? "Scanner sans code: cellule marquee CON selon NoBarcodeValue."
+                    : "Scanner sans code: cellule envoyee NG selon NoBarcodeValue."
+            };
+        }
+
+        private void ApplyScannerFallbackToIntelligentLotNoLock(LotSession lot, CellDecision decision, CellMeasurement measurement, string source)
+        {
+            if (lot == null || decision == null)
+            {
+                return;
+            }
+
+            lot.TotalCount++;
+            lot.NgCount++;
+            lot.PauseRequested = false;
+            lot.AlertMessage = decision.AlertMessage;
+            _trace.Append(
+                "SCANNER",
+                "NO_BARCODE_FALLBACK",
+                decision.Decision,
+                source,
+                "HS=" + (measurement != null && measurement.Handshake.HasValue ? measurement.Handshake.Value.ToString(CultureInfo.InvariantCulture) : "--"),
+                string.IsNullOrWhiteSpace(measurement == null ? null : measurement.Barcode) ? "--" : measurement.Barcode,
+                "Scan actif sans code valide: decision=" + decision.Decision +
+                " rejet=" + decision.RejectReason +
+                ". La cellule ne modifie pas l'apprentissage qualite."
+            );
+        }
+
+        private string SendScannerHandshakeResponseNoLock(
+            MachineConfig cfg,
+            int? handshakeValue,
+            string barcode,
+            bool scannerFallbackApplied,
+            string source)
+        {
+            if (cfg == null || !cfg.ScanEnabled || !handshakeValue.HasValue)
+            {
+                return "NONE";
+            }
+
+            if (handshakeValue.Value != 1)
+            {
+                _trace.Append(
+                    "HANDSHAKE",
+                    "SCAN_RESPONSE",
+                    "SKIPPED",
+                    source,
+                    cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                    handshakeValue.Value.ToString(CultureInfo.InvariantCulture),
+                    "Scan actif mais le top accepte n'est pas 1; aucune reponse 8230 envoyee."
+                );
+                return "SKIPPED";
+            }
+
+            var response = scannerFallbackApplied ? (ushort)2 : (ushort)0;
+            var detail = scannerFallbackApplied
+                ? "Reponse scan constructeur: 8230=2 car barcode absent/repli (" + (string.IsNullOrWhiteSpace(barcode) ? "--" : barcode) + ")."
+                : "Reponse scan constructeur: 8230=0 car barcode valide.";
+
+            if (cfg.UseSimulator)
+            {
+                _trace.Append(
+                    "HANDSHAKE",
+                    "SCAN_RESPONSE",
+                    "SIMULATED",
+                    "SIMULATEUR",
+                    cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                    response.ToString(CultureInfo.InvariantCulture),
+                    detail
+                );
+                return "SIMULATED_" + response.ToString(CultureInfo.InvariantCulture);
+            }
+
+            var ok = WriteHoldingSingleNoLock(cfg, (ushort)cfg.HandshakeRegister, response);
+            _trace.Append(
+                "HANDSHAKE",
+                "SCAN_RESPONSE",
+                ok ? "SENT" : "ERROR",
+                source,
+                cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                response.ToString(CultureInfo.InvariantCulture),
+                ok ? detail : "Echec ecriture " + detail
+            );
+            return ok ? "SENT_" + response.ToString(CultureInfo.InvariantCulture) : "ERROR";
         }
 
         private void ApplyLegacyDecisionToLot(LotSession lot, CellDecision decision)
@@ -4701,6 +5647,13 @@ namespace SortingMachineDesktop
 
         private ThresholdSet BuildProgrammableThresholdsNoLock(MachineConfig cfg, ThresholdSet localThresholds, LotSession activeLot)
         {
+            var result = BuildProgrammableThresholdsCoreNoLock(cfg, localThresholds, activeLot);
+            ClampThresholdsToConstructorDomainNoLock(result);
+            return result;
+        }
+
+        private ThresholdSet BuildProgrammableThresholdsCoreNoLock(MachineConfig cfg, ThresholdSet localThresholds, LotSession activeLot)
+        {
             if (cfg.SortingMode == SortingModes.Legacy)
             {
                 var programmable = CopyThresholds(localThresholds);
@@ -4737,7 +5690,7 @@ namespace SortingMachineDesktop
 
             if (activeLot != null && (activeLot.LearningStatus == LearningStatuses.Unstable || activeLot.PauseRequested))
             {
-                KeepPhysicalNgLaneOutsideThresholdsNoLock(cfg, disabled, recipe);
+                ProgramPhysicalNgLaneCatchAllNoLock(cfg, disabled, recipe);
                 return disabled;
             }
 
@@ -4756,7 +5709,7 @@ namespace SortingMachineDesktop
             if (activeLot == null || activeLot.Reference == null || activeLot.LearningStatus != LearningStatuses.Stable)
             {
                 disabled.Channels[laneIndex] = CreateLearningChannelThreshold();
-                KeepPhysicalNgLaneOutsideThresholdsNoLock(cfg, disabled, recipe);
+                ProgramPhysicalNgLaneCatchAllNoLock(cfg, disabled, recipe);
                 return disabled;
             }
 
@@ -4775,7 +5728,7 @@ namespace SortingMachineDesktop
                 IrMax = activeLot.Reference.MeanIr + windowIr
             };
 
-            KeepPhysicalNgLaneOutsideThresholdsNoLock(cfg, disabled, recipe);
+            ProgramPhysicalNgLaneCatchAllNoLock(cfg, disabled, recipe);
             return disabled;
         }
 
@@ -4787,14 +5740,14 @@ namespace SortingMachineDesktop
         {
             if (activeLot != null && activeLot.LearningStatus == LearningStatuses.Unstable)
             {
-                KeepPhysicalNgLaneOutsideThresholdsNoLock(cfg, disabled, recipe);
+                ProgramPhysicalNgLaneCatchAllNoLock(cfg, disabled, recipe);
                 return disabled;
             }
 
             if (activeLot == null || activeLot.Reference == null || activeLot.LearningStatus != LearningStatuses.Stable)
             {
                 EnableThresholdForLane(disabled, QualityBandRouting.LearningLaneId, CreateLearningChannelThreshold());
-                KeepPhysicalNgLaneOutsideThresholdsNoLock(cfg, disabled, recipe);
+                ProgramPhysicalNgLaneCatchAllNoLock(cfg, disabled, recipe);
                 return disabled;
             }
 
@@ -4816,15 +5769,16 @@ namespace SortingMachineDesktop
                     QualityBandRouting.BuildThresholdForBand(windows, band));
             }
 
-            KeepPhysicalNgLaneOutsideThresholdsNoLock(cfg, disabled, recipe);
+            ProgramPhysicalNgLaneCatchAllNoLock(cfg, disabled, recipe);
             return disabled;
         }
 
-        private void KeepPhysicalNgLaneOutsideThresholdsNoLock(MachineConfig cfg, ThresholdSet thresholds, IntelligentRecipe recipe)
+        private void ProgramPhysicalNgLaneCatchAllNoLock(MachineConfig cfg, ThresholdSet thresholds, IntelligentRecipe recipe)
         {
-            // Do not overlap the physical NG lane with GOOD windows: some PLC recipes give
-            // priority to the last matching channel, which would route every GOOD cell to NG.
-            EnableThresholdForLane(thresholds, ResolvePhysicalNgLaneIdNoLock(cfg, recipe), CreateDisabledChannelThreshold());
+            // Comportement constructeur: la voie physique NG recoit une fenetre catch-all pour que
+            // le PLC pousse et ramene le verin NG (slot 11) sur chaque cellule non captee par une voie GOOD.
+            // Le PLC evalue les voies dans l'ordre 1..N avec NG en dernier: la voie NG ne vole pas les GOOD.
+            EnableThresholdForLane(thresholds, ResolvePhysicalNgLaneIdNoLock(cfg, recipe), CreateNgCatchAllChannelThreshold());
         }
 
         private string ResolvePhysicalNgLaneIdNoLock(MachineConfig cfg, IntelligentRecipe recipe)
@@ -5098,6 +6052,47 @@ namespace SortingMachineDesktop
             return true;
         }
 
+        private bool TryPrimeHandshakeGateBeforeStartNoLock(MachineConfig cfg, out string message)
+        {
+            message = null;
+            if (cfg == null || cfg.UseSimulator)
+            {
+                return true;
+            }
+
+            var notes = new List<string>();
+            var handshakeValue = TryReadSingleRegister(cfg, cfg.HandshakeRegister, notes, "Handshake START");
+            if (!handshakeValue.HasValue)
+            {
+                message = "DÉMARRER bloqué : lecture du top automate 8230 impossible avant START. Vérifier la liaison PLC avant de lancer le tri, sinon la première cellule peut être ignorée.";
+                _trace.Append(
+                    "HANDSHAKE",
+                    "8230_BASELINE",
+                    "UNAVAILABLE",
+                    "PLC",
+                    cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                    string.Empty,
+                    message
+                );
+                return false;
+            }
+
+            _lastHandshakeValue = handshakeValue.Value;
+            _lastRecordedHandshake = handshakeValue.Value;
+            _lastHandshakeChange = DateTime.Now;
+            message = "Base 8230 armée avant START: " + handshakeValue.Value.ToString(CultureInfo.InvariantCulture) + ". Le prochain changement sera traité comme cellule réelle.";
+            _trace.Append(
+                "HANDSHAKE",
+                "8230_BASELINE",
+                "ARMED",
+                "PLC",
+                cfg.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                handshakeValue.Value.ToString(CultureInfo.InvariantCulture),
+                message
+            );
+            return true;
+        }
+
         private void MarkProgrammedRoutingLaneNoLock(
             MachineConfig cfg,
             LotSession activeLot,
@@ -5137,7 +6132,7 @@ namespace SortingMachineDesktop
                         detail = "Seuils 9 intervalles programmes: " + string.Join(", ", intervalDetails.ToArray()) + ".";
                     }
 
-                    detail += " NG physique voie " + ResolvePhysicalNgLaneIdNoLock(cfg, recipe) + " hors seuils: les cellules non matchees partent au rejet machine par defaut.";
+                    detail += " NG physique voie " + ResolvePhysicalNgLaneIdNoLock(cfg, recipe) + " en fenetre catch-all constructeur: le PLC pousse et ramene le verin NG sur chaque cellule non captee par une voie GOOD.";
 
                     _trace.Append(
                         "ROUTING",
@@ -5405,30 +6400,27 @@ namespace SortingMachineDesktop
 
         private bool SendThresholdSavePulseNoLock(MachineConfig cfg, string reason)
         {
-            var writeOk = WriteHoldingSingleNoLock(cfg, CycleCommandRegister, SaveChannelCode);
-
-            if (!writeOk)
-            {
-                return false;
-            }
-
-            Thread.Sleep(CycleCommandPulseMs);
-
-            var releaseOk = WriteHoldingSingleNoLock(cfg, CycleCommandRegister, 0);
+            // Comme le logiciel chinois: Save channel 59 ecrit une seule fois, sans remise a 0.
+            var writeOk = _modbus.TryWriteHoldingRegisters(
+                cfg.ComPort,
+                cfg.BaudRate,
+                (byte)cfg.SlaveId,
+                CycleCommandRegister,
+                new ushort[] { SaveChannelCode });
 
             _trace.Append(
                 "THRESHOLDS",
                 "SAVE_CHANNEL",
-                releaseOk ? "PULSE_RELEASE" : "PULSE_RELEASE_ERROR",
+                writeOk ? "WRITE_ONCE" : "WRITE_ERROR",
                 "LOCAL",
                 CycleCommandRegister.ToString(CultureInfo.InvariantCulture),
-                "0",
-                releaseOk
-                    ? "Save channel 59 appliqué après programmation seuils (" + reason + ")."
-                    : "Échec relâchement Save channel 59 après programmation seuils (" + reason + ")."
+                SaveChannelCode.ToString(CultureInfo.InvariantCulture),
+                writeOk
+                    ? "Save channel 59 appliqué après programmation seuils (" + reason + ") : écrit une seule fois comme le logiciel chinois, le PLC consomme la commande."
+                    : "Échec écriture Save channel 59 après programmation seuils (" + reason + ")."
             );
 
-            return releaseOk;
+            return writeOk;
         }
 
         private static ThresholdSet CreateDisabledThresholds(int channels)
@@ -5454,11 +6446,51 @@ namespace SortingMachineDesktop
 
         private static ChannelThreshold CreateLearningChannelThreshold()
         {
+            // Domaine constructeur uniquement (V 0..99.9, IR 0..999.99): une borne negative
+            // n'est jamais matchee par le PLC, la voie resterait muette (bug ligne 10 historique).
             return new ChannelThreshold
             {
-                VoltageMin = -4.5,
+                VoltageMin = 0,
                 VoltageMax = 4.5,
-                IrMin = -999.99,
+                IrMin = 0,
+                IrMax = 999.99
+            };
+        }
+
+        private static void ClampThresholdsToConstructorDomainNoLock(ThresholdSet thresholds)
+        {
+            // Le PLC ne matche que des fenetres dans le domaine de l'UI chinoise:
+            // V 0..99.9, IR 0..999.99. Toute valeur hors domaine est ramenee dedans
+            // avant programmation pour qu'aucune voie ne devienne silencieuse.
+            if (thresholds == null || thresholds.Channels == null)
+            {
+                return;
+            }
+
+            foreach (var channel in thresholds.Channels)
+            {
+                if (channel == null)
+                {
+                    continue;
+                }
+
+                channel.VoltageMin = Clamp(channel.VoltageMin, 0, 99.9);
+                channel.VoltageMax = Clamp(channel.VoltageMax, 0, 99.9);
+                channel.IrMin = Clamp(channel.IrMin, 0, 999.99);
+                channel.IrMax = Clamp(channel.IrMax, 0, 999.99);
+            }
+        }
+
+        private static ChannelThreshold CreateNgCatchAllChannelThreshold()
+        {
+            // Fenetre constructeur la plus large possible, dans le domaine exact de l'UI chinoise
+            // (V 0..99.9, IR 0..999.99). Pas de bornes negatives: le PLC compare en valeur absolue
+            // (preuve: routage GOOD correct les 4-5 juin avec fenetres positives et V brute negative).
+            return new ChannelThreshold
+            {
+                VoltageMin = 0,
+                VoltageMax = 99.9,
+                IrMin = 0,
                 IrMax = 999.99
             };
         }
@@ -5543,16 +6575,18 @@ namespace SortingMachineDesktop
 
             if (!preferred.IsPlausible && alternate.IsPlausible)
             {
+                var measurementRegisterText = cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture);
                 note = "Decodage mesure auto-corrige: utilisation ordre mots " + (alternate.SwapWords ? "inverse" : "normal") +
-                       " pour 8408 (" + alternate.Detail + ").";
-                _trace.Append("MEASURE", "DECODE", "AUTO_CORRECT", "PLC", "8408", alternate.Detail, note);
+                       " pour " + measurementRegisterText + " (" + alternate.Detail + ").";
+                _trace.Append("MEASURE", "DECODE", "AUTO_CORRECT", "PLC", measurementRegisterText, alternate.Detail, note);
                 return alternate;
             }
 
             if (!preferred.IsPlausible && !alternate.IsPlausible)
             {
-                note = "Mesure 8408 hors plage plausible. Conservation du decodage prefere (" + preferred.Detail + ").";
-                _trace.Append("MEASURE", "DECODE", "IMPLAUSIBLE", "PLC", "8408", preferred.Detail + " | " + alternate.Detail, note);
+                var measurementRegisterText = cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture);
+                note = "Mesure " + measurementRegisterText + " hors plage plausible. Conservation du decodage prefere (" + preferred.Detail + ").";
+                _trace.Append("MEASURE", "DECODE", "IMPLAUSIBLE", "PLC", measurementRegisterText, preferred.Detail + " | " + alternate.Detail, note);
             }
 
             return preferred;
@@ -5584,12 +6618,12 @@ namespace SortingMachineDesktop
             if (needsRelease)
             {
                 result.WriteSent = true;
-                result.WriteOk = _modbus.TryWriteHoldingRegisters(
+                result.WriteOk = _modbus.TryWriteSingleHoldingRegister(
                     cfg.ComPort,
                     cfg.BaudRate,
                     (byte)cfg.SlaveId,
                     NgPusherResetRegister,
-                    new[] { PusherResetReleasedValue }
+                    PusherResetReleasedValue
                 );
                 Thread.Sleep(150);
             }
@@ -5654,32 +6688,170 @@ namespace SortingMachineDesktop
             return result;
         }
 
-        private bool SendCycleCommandNoLock(MachineConfig cfg, ushort code, string commandName)
+        private bool IsNgAutoReleaseBlockedByRunStateNoLock()
         {
-            var writeOk = WriteHoldingSingleNoLock(cfg, CycleCommandRegister, code);
+            return _config != null &&
+                   !_config.UseSimulator &&
+                   (_operatorStartArmed || _lotControlEnabled);
+        }
 
-            if (!writeOk)
+        private void EnsureStoppedBeforeResetNoLock(MachineConfig cfg)
+        {
+            // Flux operateur constructeur: l'automate ignore Reset=26 tant qu'il est en marche
+            // (statut 8231=1, constate par lecture directe le 10 juin 2026). Comme l'operateur
+            // chinois, on envoie Stop=29 d'abord, puis on attend la sortie du run avant le 26.
+            var notes = new List<string>();
+            var status = TryReadSingleRegister(cfg, cfg.StatusRegister, notes, "Statut avant RESET");
+            if (!status.HasValue || status.Value != RunningStatusCode)
             {
-                return false;
+                return;
             }
 
-            Thread.Sleep(CycleCommandPulseMs);
+            _trace.Append(
+                "COMMAND",
+                "RESET_AUTO_STOP",
+                "ATTEMPT",
+                "LOCAL",
+                cfg.StatusRegister.ToString(CultureInfo.InvariantCulture),
+                status.Value.ToString(CultureInfo.InvariantCulture),
+                "Machine en marche (statut 1) : STOP envoyé avant le réarmement, comme le flux opérateur constructeur."
+            );
+            SendCycleCommandNoLock(cfg, StopCycleCode, "RESET_AUTO_STOP");
 
-            var releaseOk = WriteHoldingSingleNoLock(cfg, CycleCommandRegister, 0);
+            int? current = status;
+            var deadline = DateTime.Now.AddSeconds(4);
+            while (DateTime.Now < deadline)
+            {
+                Thread.Sleep(250);
+                current = TryReadSingleRegister(cfg, cfg.StatusRegister, notes, "Statut après STOP");
+                if (current.HasValue && current.Value != RunningStatusCode)
+                {
+                    break;
+                }
+            }
+
+            _trace.Append(
+                "COMMAND",
+                "RESET_AUTO_STOP",
+                current.HasValue && current.Value != RunningStatusCode ? "STOPPED" : "TIMEOUT",
+                "PLC",
+                cfg.StatusRegister.ToString(CultureInfo.InvariantCulture),
+                current.HasValue ? current.Value.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                "Statut lu après le STOP préalable au réarmement."
+            );
+        }
+
+        private bool SendCycleCommandNoLock(MachineConfig cfg, ushort code, string commandName)
+        {
+            // Logique constructeur (logiciel chinois): une seule ecriture fonction 16 sur 5978,
+            // jamais de remise a 0 cote PC. Le PLC consomme la commande et efface le registre.
+            // Reecrire 0 apres coup peut effacer la commande avant que l'automate ne la lise.
+            var writeOk = _modbus.TryWriteHoldingRegisters(
+                cfg.ComPort,
+                cfg.BaudRate,
+                (byte)cfg.SlaveId,
+                CycleCommandRegister,
+                new ushort[] { code });
 
             _trace.Append(
                 "COMMAND",
                 commandName,
-                releaseOk ? "PULSE_RELEASE" : "PULSE_RELEASE_ERROR",
+                writeOk ? "WRITE_ONCE" : "WRITE_ERROR",
                 "UI",
                 "5978",
-                "0",
-                releaseOk
-                    ? "Relâchement commande cycle envoyé."
-                    : "Échec relâchement commande cycle."
+                code.ToString(CultureInfo.InvariantCulture),
+                writeOk
+                    ? "Commande cycle écrite une seule fois comme le logiciel chinois : code " + code.ToString(CultureInfo.InvariantCulture) + " (fonction 16). Le PLC consomme la commande et remet 5978 à 0."
+                    : "Échec écriture commande cycle sur le registre 5978."
             );
 
-            return releaseOk;
+            return writeOk;
+        }
+
+        private void TrySendConstructorConnectInitNoLock(MachineConfig cfg)
+        {
+            if (cfg == null || cfg.UseSimulator || _constructorConnectInitSent)
+            {
+                return;
+            }
+
+            _constructorConnectInitSent = true;
+            // Le logiciel chinois ecrit 5978=57 a chaque connexion (MC.Start). On reproduit.
+            var ok = _modbus.TryWriteHoldingRegisters(
+                cfg.ComPort,
+                cfg.BaudRate,
+                (byte)cfg.SlaveId,
+                CycleCommandRegister,
+                new ushort[] { ConnectInitCode });
+            _trace.Append(
+                "COMMAND",
+                "CONNECT_INIT",
+                ok ? "WRITE_ONCE" : "WRITE_ERROR",
+                "LOCAL",
+                "5978",
+                ConnectInitCode.ToString(CultureInfo.InvariantCulture),
+                ok
+                    ? "Initialisation constructeur à la connexion : 5978=57 écrit une seule fois, comme le logiciel chinois."
+                    : "Échec initialisation constructeur 5978=57 à la connexion."
+            );
+
+            ArmPusherStationsNoLock(cfg, "CONNECT");
+        }
+
+        private void ArmPusherStationsNoLock(MachineConfig cfg, string source)
+        {
+            // Etat production constructeur: chaque station piston (enables 28414..28424) doit
+            // valoir 1, sinon le PLC compte la voie mais ne tire jamais le piston (constate par
+            // lecture directe le 10 juin 2026). On rearme automatiquement toute station a 0,
+            // un registre a la fois, sans jamais ecrire les sorties 28926..28936.
+            if (cfg == null || cfg.UseSimulator)
+            {
+                return;
+            }
+
+            var armed = new List<string>();
+            var failed = new List<string>();
+            for (var index = 0; index <= NgCounterIndex; index++)
+            {
+                var enableRegister = (ushort)(PusherCylinderEnableBaseRegister + index);
+                var laneLabel = index == NgCounterIndex ? "NG" : (index + 1).ToString(CultureInfo.InvariantCulture);
+                ushort current;
+                if (TryReadHoldingSingleNoLock(cfg, enableRegister, out current) && current != 0)
+                {
+                    continue;
+                }
+
+                var writeOk = WritePistonIoMaintenanceSingleNoLock(cfg, enableRegister, PusherActiveValue);
+                Thread.Sleep(40);
+                ushort after;
+                var hasAfter = TryReadHoldingSingleNoLock(cfg, enableRegister, out after);
+                if (writeOk && hasAfter && after != 0)
+                {
+                    armed.Add(laneLabel);
+                }
+                else
+                {
+                    failed.Add(laneLabel);
+                }
+            }
+
+            if (armed.Count == 0 && failed.Count == 0)
+            {
+                return;
+            }
+
+            _trace.Append(
+                "MAINTENANCE",
+                "PUSHER_STATIONS_AUTO_ARM",
+                failed.Count == 0 ? "ARMED" : "PARTIAL",
+                "LOCAL",
+                "28414..28424",
+                "1",
+                "Armement automatique des stations pistons (" + source + "): armees=" +
+                (armed.Count > 0 ? string.Join(",", armed.ToArray()) : "aucune") +
+                (failed.Count > 0 ? " ; echecs=" + string.Join(",", failed.ToArray()) : "") +
+                ". Etat production constructeur; les sorties 28926..28936 ne sont jamais ecrites."
+            );
         }
 
         private bool MachineRequiresResetBeforeStartNoLock(MachineConfig cfg)
@@ -5745,14 +6917,68 @@ namespace SortingMachineDesktop
 
         private MaintenanceCommandResult ExecuteConveyorOnlyForwardNoLock(string commandName, int pulseMs, string detail)
         {
+            if (IsMaintenanceConveyorBlockedByRunStateNoLock())
+            {
+                var runBlockMessage = "Avance tapis maintenance bloquée pendant le tri en cours. Utiliser STOP ou PAUSE, attendre l'arrêt des tops 8230, puis relancer l'avance tapis.";
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "BLOCKED_RUN",
+                    "LOCAL",
+                    _config.HandshakeRegister.ToString(CultureInfo.InvariantCulture),
+                    _lastRecordedHandshake.HasValue ? _lastRecordedHandshake.Value.ToString(CultureInfo.InvariantCulture) : string.Empty,
+                    runBlockMessage
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = runBlockMessage,
+                    RequiresExpert = false,
+                    BlockedBySafety = true,
+                    TerrainValidated = true,
+                    Simulated = false,
+                    Mode = "CONVEYOR_COIL",
+                    Register = ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = "coil"
+                };
+            }
+
+            var safetyBlock = _config.UseSimulator ? null : BuildPistonSafetyBlockMessageNoLock();
+            if (!string.IsNullOrWhiteSpace(safetyBlock))
+            {
+                _trace.Append(
+                    "MAINTENANCE",
+                    commandName,
+                    "BLOCKED",
+                    "PLC",
+                    _config.AlarmRegister.ToString(CultureInfo.InvariantCulture),
+                    BuildAlarmSummary(_alarmsActive),
+                    "Avance tapis non envoyee: bloquee par securite. " + safetyBlock
+                );
+                return new MaintenanceCommandResult
+                {
+                    Ok = false,
+                    Command = commandName,
+                    Message = "Avance tapis bloquée : " + safetyBlock,
+                    RequiresExpert = false,
+                    BlockedBySafety = true,
+                    TerrainValidated = true,
+                    Simulated = _config.UseSimulator,
+                    Mode = "CONVEYOR_COIL",
+                    Register = ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture),
+                    Value = "coil"
+                };
+            }
+
             _trace.Append(
                 "MAINTENANCE",
                 commandName,
                 "ATTEMPT",
                 _config.UseSimulator ? "SIMULATEUR" : "UI",
                 ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture),
-                ConveyorForwardCode.ToString(CultureInfo.InvariantCulture),
-                detail + " Adresse 1X=" + ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture) +
+                "coil",
+                detail + " Adresse coil 1X=" + ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture) +
                 ", durée impulsion=" + pulseMs.ToString(CultureInfo.InvariantCulture) + " ms."
             );
 
@@ -5762,18 +6988,17 @@ namespace SortingMachineDesktop
                 {
                     Ok = true,
                     Command = commandName,
-                    Message = "Simulateur actif : dégagement convoyeur seul tracé seulement.",
+                    Message = "Simulateur actif : avance tapis tracée seulement.",
                     RequiresExpert = false,
                     TerrainValidated = true,
                     Simulated = true,
-                    Mode = "CONVEYOR_ONLY",
+                    Mode = "CONVEYOR_COIL",
                     Register = ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture),
-                    Value = ConveyorForwardCode.ToString(CultureInfo.InvariantCulture)
+                    Value = "coil"
                 };
             }
 
-            var moved = SendCoilPulseNoLock(_config, ConveyorForwardRegister, commandName, pulseMs);
-            var ok = moved;
+            var ok = SendCoilPulseNoLock(_config, ConveyorForwardRegister, commandName, pulseMs);
 
             _trace.Append(
                 "MAINTENANCE",
@@ -5781,10 +7006,10 @@ namespace SortingMachineDesktop
                 ok ? "SENT" : "ERROR",
                 "UI",
                 ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture),
-                ConveyorForwardCode.ToString(CultureInfo.InvariantCulture),
+                "coil",
                 ok
-                    ? detail + " Commande terminée; aucune écriture piston envoyée."
-                    : "Échec dégagement convoyeur seul; vérifier arrêt d'urgence, air et blocage mécanique."
+                    ? detail + " Commande terminée."
+                    : "Échec avance tapis; vérifier arrêt d'urgence, air et coil convoyeur."
             );
 
             return new MaintenanceCommandResult
@@ -5793,27 +7018,39 @@ namespace SortingMachineDesktop
                 Command = commandName,
                 Message = ok
                     ? (commandName == "CONVEYOR_FINE_FORWARD"
-                        ? "Micro-avance tapis envoyée. Aucun signal piston envoyé."
-                        : "Convoyeur avancé seul. Aucun signal piston envoyé.")
-                    : "Échec du dégagement convoyeur seul. Vérifier arrêt d'urgence, air et blocage mécanique.",
+                        ? "Micro-avance tapis envoyée (coil constructeur 1X 5981)."
+                        : "Convoyeur avancé (coil constructeur 1X 5981).")
+                    : "Échec de l'avance tapis. Vérifier arrêt d'urgence, air et convoyeur.",
                 RequiresExpert = false,
                 TerrainValidated = true,
                 Simulated = false,
-                Mode = "CONVEYOR_ONLY",
+                Mode = "CONVEYOR_COIL",
                 Register = ConveyorForwardRegister.ToString(CultureInfo.InvariantCulture),
-                Value = "coil 1X ON puis OFF"
+                Value = "coil 1X ON/OFF"
             };
+        }
+
+        private bool IsMaintenanceConveyorBlockedByRunStateNoLock()
+        {
+            return _config != null &&
+                   !_config.UseSimulator &&
+                   (_operatorStartArmed || _lotControlEnabled);
         }
 
         private bool SendCoilPulseNoLock(MachineConfig cfg, ushort address, string commandName, int pulseMs)
         {
+            return SendCoilPulseNoLock(cfg, address, "MAINTENANCE", commandName, "UI", pulseMs);
+        }
+
+        private bool SendCoilPulseNoLock(MachineConfig cfg, ushort address, string traceCategory, string commandName, string source, int pulseMs)
+        {
             var writeOk = WriteCoilSingleNoLock(cfg, address, true);
 
             _trace.Append(
-                "MAINTENANCE",
+                traceCategory,
                 commandName,
                 writeOk ? "COIL_ON" : "COIL_ON_ERROR",
-                "UI",
+                source,
                 address.ToString(CultureInfo.InvariantCulture),
                 "1",
                 writeOk ? "Coil convoyeur activé." : "Échec activation coil convoyeur."
@@ -5829,10 +7066,10 @@ namespace SortingMachineDesktop
             var releaseOk = WriteCoilSingleNoLock(cfg, address, false);
 
             _trace.Append(
-                "MAINTENANCE",
+                traceCategory,
                 commandName,
                 releaseOk ? "COIL_OFF" : "COIL_OFF_ERROR",
-                "UI",
+                source,
                 address.ToString(CultureInfo.InvariantCulture),
                 "0",
                 releaseOk ? "Coil convoyeur relâché." : "Échec relâchement coil convoyeur."
@@ -5888,10 +7125,10 @@ namespace SortingMachineDesktop
                 "UI",
                 register.ToString(CultureInfo.InvariantCulture),
                 "0",
-                releaseOk ? "Relâchement commande maintenance envoyé." : "Échec relâchement commande maintenance."
+                releaseOk ? "Relâchement commande maintenance envoyé." : "Échec relâchement commande maintenance (best-effort, impulsion déjà envoyée)."
             );
 
-            return releaseOk;
+            return writeOk;
         }
 
         private bool WriteHoldingSingleNoLock(MachineConfig cfg, ushort register, ushort value)
@@ -5910,12 +7147,12 @@ namespace SortingMachineDesktop
                 return false;
             }
 
-            return _modbus.TryWriteHoldingRegisters(
+            return _modbus.TryWriteSingleHoldingRegister(
                 cfg.ComPort,
                 cfg.BaudRate,
                 (byte)cfg.SlaveId,
                 register,
-                new[] { value }
+                value
             );
         }
 
@@ -5949,9 +7186,44 @@ namespace SortingMachineDesktop
                 "LOCAL",
                 register.ToString(CultureInfo.InvariantCulture),
                 value.ToString(CultureInfo.InvariantCulture),
-                "Écriture directe piston bloquée en réel. Seule la libération ciblée du reset NG 28305=1 est autorisée."
+                "Écriture directe piston bloquée en réel. En production, les GOOD passent par les seuils PLC et le NG validé terrain passe par Y11 4X 3144 bit 10."
             );
             return false;
+        }
+
+        private bool WritePistonIoMaintenanceSingleNoLock(MachineConfig cfg, ushort register, ushort value)
+        {
+            if (!IsPusherMaintenanceIoRegister(register))
+            {
+                _trace.Append(
+                    "SAFETY",
+                    "PISTON_MAINT_WRITE_BLOCKED",
+                    "BLOCKED",
+                    "LOCAL",
+                    register.ToString(CultureInfo.InvariantCulture),
+                    value.ToString(CultureInfo.InvariantCulture),
+                    "Écriture maintenance piston bloquée : seuls les enables 28414..28424 et sorties 28926..28936 sont autorisés. Les resets 28295..28305 ne sont pas pulsés."
+                );
+                return false;
+            }
+
+            if (cfg != null && cfg.UseSimulator)
+            {
+                return true;
+            }
+
+            if (cfg == null)
+            {
+                return false;
+            }
+
+            return _modbus.TryWriteSingleHoldingRegister(
+                cfg.ComPort,
+                cfg.BaudRate,
+                (byte)cfg.SlaveId,
+                register,
+                value
+            );
         }
 
         private static bool IsPusherCommandRegister(ushort register)
@@ -5961,6 +7233,14 @@ namespace SortingMachineDesktop
             var outputEnd = PusherCylinderOutputBaseRegister + 10;
             return (register >= PusherResetCommandBaseRegister && register <= resetEnd) ||
                    (register >= PusherCylinderEnableBaseRegister && register <= enableEnd) ||
+                   (register >= PusherCylinderOutputBaseRegister && register <= outputEnd);
+        }
+
+        private static bool IsPusherMaintenanceIoRegister(ushort register)
+        {
+            var enableEnd = PusherCylinderEnableBaseRegister + 10;
+            var outputEnd = PusherCylinderOutputBaseRegister + 10;
+            return (register >= PusherCylinderEnableBaseRegister && register <= enableEnd) ||
                    (register >= PusherCylinderOutputBaseRegister && register <= outputEnd);
         }
 
@@ -6033,7 +7313,7 @@ namespace SortingMachineDesktop
             if (!string.IsNullOrWhiteSpace(observeDetail))
             {
                 notes.Add(observeDetail);
-                _trace.Append("CONFIG", "SWAP_WORDS", "AUTO_OBSERVE", "PLC", "8408", swapWords ? "true" : "false", observeDetail);
+                _trace.Append("CONFIG", "SWAP_WORDS", "AUTO_OBSERVE", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), swapWords ? "true" : "false", observeDetail);
             }
 
             if (!changed)
@@ -6043,7 +7323,7 @@ namespace SortingMachineDesktop
 
             var detail = "Ordre des mots Modbus memorise automatiquement: " + (swapWords ? "inverse" : "normal") + ".";
             notes.Add(detail);
-            _trace.Append("CONFIG", "SWAP_WORDS", "AUTO_APPLY", "PLC", "8408", swapWords ? "true" : "false", detail);
+            _trace.Append("CONFIG", "SWAP_WORDS", "AUTO_APPLY", "PLC", cfg.MeasurementRegister.ToString(CultureInfo.InvariantCulture), swapWords ? "true" : "false", detail);
         }
 
         private MeasurementDecodeCandidate BuildMeasurementCandidate(MachineConfig cfg, float first, float second, string label, bool swapWords)
@@ -8158,7 +9438,11 @@ namespace SortingMachineDesktop
             if (string.IsNullOrWhiteSpace(_config.ComPort)) _config.ComPort = "COM1";
             if (_config.BaudRate <= 0) _config.BaudRate = 19200;
             if (_config.SlaveId <= 0) _config.SlaveId = 1;
-            if (_config.MeasurementRegister <= 0) _config.MeasurementRegister = 8408;
+            if (_config.MeasurementRegister <= 0 ||
+                _config.MeasurementRegister == MachineConfig.KnownErroneousMeasurementRegister)
+            {
+                _config.MeasurementRegister = MachineConfig.DefaultMeasurementRegister;
+            }
             if (_config.AlarmRegister <= 0) _config.AlarmRegister = 22808;
             if (_config.HandshakeRegister <= 0) _config.HandshakeRegister = 8230;
             if (_config.StatusRegister <= 0) _config.StatusRegister = 8231;
@@ -8489,8 +9773,122 @@ namespace SortingMachineDesktop
                 ThresholdsObserved = diagnostic.ThresholdsObserved,
                 ThresholdStatus = diagnostic.ThresholdStatus,
                 ThresholdDifferences = new List<ThresholdDifference>(diagnostic.ThresholdDifferences ?? new List<ThresholdDifference>()),
+                PhysicalRouting = CopyPhysicalRoutingDiagnostic(diagnostic.PhysicalRouting),
+                StartReadiness = CopyStartReadinessDiagnostic(diagnostic.StartReadiness),
+                FieldValidation = CopyFieldValidationDiagnostic(diagnostic.FieldValidation),
                 ObservationEventCount = diagnostic.ObservationEventCount,
                 Notes = new List<string>(diagnostic.Notes ?? new List<string>())
+            };
+        }
+
+        private static FieldValidationDiagnostic CopyFieldValidationDiagnostic(FieldValidationDiagnostic diagnostic)
+        {
+            if (diagnostic == null)
+            {
+                return null;
+            }
+
+            return new FieldValidationDiagnostic
+            {
+                HasReport = diagnostic.HasReport,
+                Verified = diagnostic.Verified,
+                Status = diagnostic.Status,
+                ReportPath = diagnostic.ReportPath,
+                ReportTimestamp = diagnostic.ReportTimestamp,
+                ReportLotId = diagnostic.ReportLotId,
+                CurrentLotId = diagnostic.CurrentLotId,
+                MatchesCurrentLot = diagnostic.MatchesCurrentLot,
+                TraceVerdict = diagnostic.TraceVerdict,
+                CounterVerdict = diagnostic.CounterVerdict,
+                PhysicalObservationVerdict = diagnostic.PhysicalObservationVerdict,
+                LaneCoverageVerdict = diagnostic.LaneCoverageVerdict,
+                Summary = diagnostic.Summary,
+                ValidationCommand = diagnostic.ValidationCommand,
+                CheckCommand = diagnostic.CheckCommand,
+                MissingReasons = new List<string>(diagnostic.MissingReasons ?? new List<string>())
+            };
+        }
+
+        private static StartReadinessDiagnostic CopyStartReadinessDiagnostic(StartReadinessDiagnostic diagnostic)
+        {
+            if (diagnostic == null)
+            {
+                return null;
+            }
+
+            return new StartReadinessDiagnostic
+            {
+                ReadyToStart = diagnostic.ReadyToStart,
+                Connected = diagnostic.Connected,
+                HandshakeReady = diagnostic.HandshakeReady,
+                HandshakeRegister = diagnostic.HandshakeRegister,
+                HandshakeValue = diagnostic.HandshakeValue,
+                HandshakeChangedAt = diagnostic.HandshakeChangedAt,
+                LotAssociated = diagnostic.LotAssociated,
+                ModelStable = diagnostic.ModelStable,
+                ThresholdsSynchronized = diagnostic.ThresholdsSynchronized,
+                MachineRequiresReset = diagnostic.MachineRequiresReset,
+                BlockingAlarmActive = diagnostic.BlockingAlarmActive,
+                OperatorConfirmationRequired = diagnostic.OperatorConfirmationRequired,
+                MachineStatus = diagnostic.MachineStatus,
+                LotStatus = diagnostic.LotStatus,
+                ExpectedLane = diagnostic.ExpectedLane,
+                AppliedLane = diagnostic.AppliedLane,
+                BlockingReasons = new List<string>(diagnostic.BlockingReasons ?? new List<string>()),
+                Warnings = new List<string>(diagnostic.Warnings ?? new List<string>()),
+                OperatorChecks = new List<string>(diagnostic.OperatorChecks ?? new List<string>())
+            };
+        }
+
+        private static PhysicalRoutingDiagnostic CopyPhysicalRoutingDiagnostic(PhysicalRoutingDiagnostic diagnostic)
+        {
+            if (diagnostic == null)
+            {
+                return null;
+            }
+
+            return new PhysicalRoutingDiagnostic
+            {
+                ExpectedLane = diagnostic.ExpectedLane,
+                AppliedLane = diagnostic.AppliedLane,
+                ConfirmedLane = diagnostic.ConfirmedLane,
+                HandshakeRegister = diagnostic.HandshakeRegister,
+                LastHandshake = diagnostic.LastHandshake,
+                StatusRegister = diagnostic.StatusRegister,
+                MachineStatus = diagnostic.MachineStatus,
+                ThresholdStatus = diagnostic.ThresholdStatus,
+                ProgrammedThresholds = CopyThresholds(diagnostic.ProgrammedThresholds),
+                ObservedThresholds = diagnostic.ObservedThresholds == null ? null : CopyThresholds(diagnostic.ObservedThresholds),
+                AlarmRegisters = new List<ushort>(diagnostic.AlarmRegisters ?? new List<ushort>()),
+                AlarmSummary = diagnostic.AlarmSummary,
+                LastNgPulse = CopyNgPulseDiagnostic(diagnostic.LastNgPulse),
+                PhysicalRoutingMode = diagnostic.PhysicalRoutingMode,
+                GoodPusherDirectControlBlocked = diagnostic.GoodPusherDirectControlBlocked
+            };
+        }
+
+        private static NgPulseDiagnostic CopyNgPulseDiagnostic(NgPulseDiagnostic diagnostic)
+        {
+            if (diagnostic == null)
+            {
+                return null;
+            }
+
+            return new NgPulseDiagnostic
+            {
+                Timestamp = diagnostic.Timestamp,
+                Handshake = diagnostic.Handshake,
+                Status = diagnostic.Status,
+                OutputPath = diagnostic.OutputPath,
+                OutputImageRegister = diagnostic.OutputImageRegister,
+                OutputBit = diagnostic.OutputBit,
+                EnableRegister = diagnostic.EnableRegister,
+                OutputRegister = diagnostic.OutputRegister,
+                EnableValue = diagnostic.EnableValue,
+                OutputValue = diagnostic.OutputValue,
+                Result = diagnostic.Result,
+                Source = diagnostic.Source,
+                Detail = diagnostic.Detail
             };
         }
 
@@ -8726,8 +10124,83 @@ namespace SortingMachineDesktop
                 ThresholdsObserved = false,
                 ThresholdStatus = "Aucune lecture",
                 ThresholdDifferences = new List<ThresholdDifference>(),
+                PhysicalRouting = new PhysicalRoutingDiagnostic
+                {
+                    ExpectedLane = "NG",
+                    AppliedLane = "NG",
+                    ConfirmedLane = null,
+                    HandshakeRegister = cfg.HandshakeRegister,
+                    StatusRegister = cfg.StatusRegister,
+                    ThresholdStatus = "Aucune lecture",
+                    ProgrammedThresholds = new ThresholdSet { Channels = new List<ChannelThreshold>() },
+                    ObservedThresholds = null,
+                    AlarmRegisters = new List<ushort>(),
+                    AlarmSummary = "Aucune alarme",
+                    LastNgPulse = CreateEmptyNgPulseDiagnostic(),
+                    PhysicalRoutingMode = "PLC_THRESHOLDS_NG_CATCHALL",
+                    GoodPusherDirectControlBlocked = true
+                },
+                StartReadiness = new StartReadinessDiagnostic
+                {
+                    ReadyToStart = false,
+                    Connected = false,
+                    HandshakeReady = false,
+                    HandshakeRegister = cfg.HandshakeRegister,
+                    HandshakeValue = null,
+                    HandshakeChangedAt = null,
+                    LotAssociated = false,
+                    ModelStable = false,
+                    ThresholdsSynchronized = false,
+                    MachineRequiresReset = false,
+                    BlockingAlarmActive = false,
+                    OperatorConfirmationRequired = true,
+                    MachineStatus = null,
+                    LotStatus = "INITIALIZING",
+                    ExpectedLane = "NG",
+                    AppliedLane = "NG",
+                    BlockingReasons = new List<string> { "Initialisation en cours." },
+                    Warnings = new List<string>(),
+                    OperatorChecks = new List<string>()
+                },
+                FieldValidation = new FieldValidationDiagnostic
+                {
+                    HasReport = false,
+                    Verified = false,
+                    Status = "NO_REPORT",
+                    ReportLotId = null,
+                    CurrentLotId = null,
+                    MatchesCurrentLot = false,
+                    TraceVerdict = "UNKNOWN",
+                    CounterVerdict = "UNKNOWN",
+                    PhysicalObservationVerdict = "UNKNOWN",
+                    LaneCoverageVerdict = "UNKNOWN",
+                    Summary = "Aucun rapport terrain operateur trouve.",
+                    ValidationCommand = "validate_tricell_field.bat 180",
+                    CheckCommand = "check_tricell_field_result.bat",
+                    MissingReasons = new List<string> { "Rapport terrain operateur absent." }
+                },
                 ObservationEventCount = 0,
                 Notes = new List<string> { "Initialisation en cours." }
+            };
+        }
+
+        private static NgPulseDiagnostic CreateEmptyNgPulseDiagnostic()
+        {
+            return new NgPulseDiagnostic
+            {
+                Timestamp = null,
+                Handshake = null,
+                Status = "NONE",
+                OutputPath = "Y11_4X_3144_BIT_10",
+                OutputImageRegister = Y11OutputImageRegister,
+                OutputBit = Y11OutputImageBit,
+                EnableRegister = Y11OutputImageRegister,
+                OutputRegister = Y11OutputImageRegister,
+                EnableValue = 0,
+                OutputValue = 0,
+                Result = "Aucun pulse NG enregistré",
+                Source = "LOCAL",
+                Detail = "Diagnostic maintenance Y11 uniquement: en production, le vérin NG est poussé par le PLC via la voie 11 catch-all."
             };
         }
 

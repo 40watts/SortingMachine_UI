@@ -62,6 +62,8 @@ namespace SortingMachineDesktop
                 data.Config = MachineConfig.CreateDefault();
             }
 
+            var migratedConfig = MigrateKnownMeasurementDefaults(data.Config);
+
             if (data.Thresholds == null)
             {
                 data.Thresholds = new Dictionary<string, ThresholdSet>
@@ -78,6 +80,11 @@ namespace SortingMachineDesktop
                     { "21700", CreateDefaultIntelligentRecipe("21700") },
                     { "18650", CreateDefaultIntelligentRecipe("18650") }
                 };
+            }
+
+            if (migratedConfig)
+            {
+                Save(data);
             }
 
             return data;
@@ -209,6 +216,22 @@ namespace SortingMachineDesktop
 
             var trimmed = json.TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
             return !trimmed.StartsWith("{", StringComparison.Ordinal);
+        }
+
+        private bool MigrateKnownMeasurementDefaults(MachineConfig cfg)
+        {
+            if (cfg == null)
+            {
+                return false;
+            }
+
+            if (cfg.MeasurementRegister == MachineConfig.KnownErroneousMeasurementRegister)
+            {
+                cfg.MeasurementRegister = MachineConfig.DefaultMeasurementRegister;
+                return true;
+            }
+
+            return false;
         }
 
         private void QuarantineConfigFile(string reason)
