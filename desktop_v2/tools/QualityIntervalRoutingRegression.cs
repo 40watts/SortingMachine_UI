@@ -47,6 +47,7 @@ namespace SortingMachineDesktop
             AssertStableRoutingIgnoresFullLaneState(recipe, sample, reference);
             AssertLearningRequiresAll19CellsDespiteFullSignal(recipe);
             AssertGaussianLotFillsLanesEvenly(recipe);
+            AssertCalibrationRebalancesBiasedLot(recipe);
 
             Console.WriteLine("QualityIntervalRoutingRegression OK");
             return 0;
@@ -548,6 +549,86 @@ namespace SortingMachineDesktop
                 var share = counts[lane] / (double)routed;
                 AssertTrue("lot gaussien: voie " + (lane + 1) + " pas affamee (" + counts[lane] + "/" + routed + ")", share >= 0.05);
                 AssertTrue("lot gaussien: voie " + (lane + 1) + " ne deborde pas (" + counts[lane] + "/" + routed + ")", share <= 0.20);
+            }
+        }
+
+        private static void AssertCalibrationRebalancesBiasedLot(IntelligentRecipe recipe)
+        {
+            // Reproduit le defaut terrain du 10 juin 2026: echantillon d'apprentissage tire vers
+            // le haut (μ+0.2σ) alors que la production reelle est centree plus bas et asymetrique.
+            // La calibration continue doit ramener les bacs vers ~1/9 chacun.
+            const double trueMean = 13.30;
+            const double trueSigma = 0.30;
+            const double learningBias = 0.20;
+            var zScores = new[]
+            {
+                -1.83, -1.40, -1.13, -0.92, -0.74, -0.59, -0.45, -0.31, -0.18,
+                0.0, 0.18, 0.31, 0.45, 0.59, 0.74, 0.92, 1.13, 1.40, 1.83
+            };
+            var sample = new List<SamplePoint>();
+            for (var i = 0; i < zScores.Length; i++)
+            {
+                sample.Add(new SamplePoint
+                {
+                    Voltage = 3.600 + ((i % 3) - 1) * 0.0002,
+                    Ir = trueMean + learningBias + trueSigma * zScores[i],
+                    Timestamp = "2026-06-10 16:00:" + i.ToString("00")
+                });
+            }
+
+            var reference = QualityBandRouting.BuildReference(recipe, sample);
+            var random = new Random(424242);
+            var calibration = new List<double>();
+            var counts = new int[QualityBandRouting.SortLaneCount];
+            var routed = 0;
+            const int population = 700;
+            var calibrationFrozenAt = -1;
+            for (var i = 0; i < population; i++)
+            {
+                var u1 = 1.0 - random.NextDouble();
+                var u2 = random.NextDouble();
+                var gaussian = Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
+                // production reelle: centre vrai + asymetrie a droite
+                var ir = trueMean + trueSigma * gaussian + (gaussian > 1.0 ? trueSigma * 0.6 * (gaussian - 1.0) : 0.0);
+                var windows = QualityBandRouting.BuildWindows(recipe, reference, sample);
+                string reason;
+                var band = QualityBandRouting.ResolveBand(3.600, ir, reference, windows, out reason);
+                if (band <= 0)
+                {
+                    continue;
+                }
+
+                // imite TryCalibrateLotIntervalsNoLock: collecte + calibration periodique
+                if (calibration.Count < QualityBandRouting.CalibrationHorizonCells)
+                {
+                    calibration.Add(ir);
+                    var n = calibration.Count;
+                    var atHorizon = n >= QualityBandRouting.CalibrationHorizonCells;
+                    if (n >= QualityBandRouting.CalibrationMinimumCells &&
+                        (n % QualityBandRouting.CalibrationUpdateEvery == 0 || atHorizon))
+                    {
+                        QualityBandRouting.TryCalibrateIntervals(reference, calibration);
+                        if (atHorizon)
+                        {
+                            calibrationFrozenAt = i;
+                        }
+                    }
+                }
+                else if (i > calibrationFrozenAt + 50 && calibrationFrozenAt > 0)
+                {
+                    // apres le gel + marge, on mesure l'equilibre en regime etabli
+                    counts[band - 1]++;
+                    routed++;
+                }
+            }
+
+            AssertTrue("calibration: gel atteint", calibrationFrozenAt > 0);
+            AssertTrue("calibration: assez de cellules mesurees apres gel (" + routed + ")", routed >= 300);
+            for (var lane = 0; lane < counts.Length; lane++)
+            {
+                var share = counts[lane] / (double)routed;
+                AssertTrue("calibration: voie " + (lane + 1) + " pas affamee (" + counts[lane] + "/" + routed + ")", share >= 0.04);
+                AssertTrue("calibration: voie " + (lane + 1) + " ne deborde pas (" + counts[lane] + "/" + routed + ")", share <= 0.22);
             }
         }
 

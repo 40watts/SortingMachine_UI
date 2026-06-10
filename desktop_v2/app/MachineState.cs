@@ -4182,6 +4182,8 @@ namespace SortingMachineDesktop
                             " routing_control=PLC_THRESHOLDS_NG_CATCHALL"
                         );
 
+                        TryCalibrateLotIntervalsNoLock(cfg, activeLot, decision, ir, measurementAvailable);
+
                         PersistBusiness();
                     }
                     else
@@ -8242,6 +8244,74 @@ namespace SortingMachineDesktop
                 "STOP automatique interdit après " + (string.IsNullOrWhiteSpace(action) ? "sécurité" : action) +
                 (string.IsNullOrWhiteSpace(value) ? string.Empty : " (" + value + ").") +
                 " Message logiciel: " + (string.IsNullOrWhiteSpace(message) ? "--" : message)
+            );
+        }
+
+        private void TryCalibrateLotIntervalsNoLock(MachineConfig cfg, LotSession activeLot, CellDecision decision, double ir, bool measurementAvailable)
+        {
+            // Calibration continue: les 19 cellules d'apprentissage ne suffisent jamais a placer
+            // parfaitement les coupures. Pendant les premieres cellules de production, chaque
+            // coupure glisse d'un pas amorti vers le quantile reel k/9 du lot mesure, puis se
+            // fige. Les gardes IR/tension et la voie NG ne bougent jamais; chaque cellule reste
+            // auditee avec les bornes exactes qui lui ont ete appliquees.
+            if (cfg == null || activeLot == null || decision == null || !measurementAvailable ||
+                !string.Equals(cfg.SortingMode, SortingModes.IntelligentGoodNg, StringComparison.OrdinalIgnoreCase) ||
+                activeLot.Reference == null ||
+                !string.Equals(activeLot.LearningStatus, LearningStatuses.Stable, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var reference = activeLot.Reference;
+            var normalizedIr = Math.Abs(ir);
+            if (normalizedIr < reference.IrMin || normalizedIr >= reference.IrMax)
+            {
+                return;
+            }
+
+            if (activeLot.CalibrationIr == null)
+            {
+                activeLot.CalibrationIr = new List<double>();
+            }
+
+            if (activeLot.CalibrationIr.Count >= QualityBandRouting.CalibrationHorizonCells)
+            {
+                return;
+            }
+
+            activeLot.CalibrationIr.Add(normalizedIr);
+            var count = activeLot.CalibrationIr.Count;
+            var horizonReached = count >= QualityBandRouting.CalibrationHorizonCells;
+            if (count < QualityBandRouting.CalibrationMinimumCells ||
+                (count % QualityBandRouting.CalibrationUpdateEvery != 0 && !horizonReached))
+            {
+                return;
+            }
+
+            if (!QualityBandRouting.TryCalibrateIntervals(reference, activeLot.CalibrationIr))
+            {
+                return;
+            }
+
+            _forceThresholdSync = true;
+            var summary = new List<string>();
+            foreach (var interval in reference.QualityIntervals)
+            {
+                summary.Add("L" + interval.Index.ToString(CultureInfo.InvariantCulture) + " " +
+                    interval.IrMin.ToString("0.000", CultureInfo.InvariantCulture) + "-" +
+                    interval.IrMax.ToString("0.000", CultureInfo.InvariantCulture));
+            }
+
+            _trace.Append(
+                "ROUTING",
+                "INTERVALS_CALIBRATED",
+                horizonReached ? "FROZEN" : "ACTIVE",
+                "LOCAL",
+                "1188..1370",
+                count.ToString(CultureInfo.InvariantCulture),
+                "Calibration continue des coupures IR sur " + count.ToString(CultureInfo.InvariantCulture) +
+                " cellules de production (gardes et NG inchangés): " + string.Join(", ", summary.ToArray()) +
+                (horizonReached ? ". Coupures figées pour le reste du lot." : ".")
             );
         }
 

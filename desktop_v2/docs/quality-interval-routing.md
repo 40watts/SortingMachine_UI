@@ -9,7 +9,7 @@ Le mode intelligent actuel classe un lot en 9 intervalles de resistance, associe
 1. Les cellules d'apprentissage vont en ligne 10.
 2. Le modele se fige uniquement apres 19 cellules ligne 10.
 3. Les signaux de ligne pleine restent des alarmes machine; ils ne changent pas le modele de tri logiciel.
-4. Une fois le modele fige, les intervalles restent attaches a la reference du lot et ne sont plus recalcules pendant la production.
+4. Une fois le modele fige, les gardes IR/tension et la voie NG ne bougent plus. Les 8 coupures internes beneficient d'une calibration continue pendant les 100 premieres cellules de production (voir section dediee), puis se figent definitivement.
 
 ## Regle de tri
 
@@ -44,6 +44,18 @@ Les 8 coupures internes visent l'equilibrage des bacs: chaque voie GOOD doit rec
 - 10% decoupage regulier: stabilisateur contre le bruit d'un petit echantillon.
 
 Les largeurs d'intervalles sont donc volontairement inegales (c'est le comptage par voie qui est egalise, pas la largeur). La regression `AssertGaussianLotFillsLanesEvenly` verifie qu'un lot gaussien remplit chaque voie entre 5% et 20% (uniforme = 11%).
+
+## Calibration continue des coupures
+
+19 cellules d'apprentissage ne suffisent jamais a placer parfaitement les coupures: l'echantillon peut tomber un peu plus haut ou plus bas que la vraie population (constate le 10 juin 2026: voies 1-4 a 77% du lot, voie 9 a 2 cellules). Pendant les `100` premieres cellules de production dans la garde IR:
+
+- toutes les `5` cellules, chaque coupure interne glisse d'un pas amorti (`30%`) vers le quantile reel `k/9` des cellules de production mesurees;
+- les gardes IR/tension, la voie NG et la decision GOOD/NG ne bougent jamais — seule la repartition entre voies GOOD s'affine;
+- les coupures restent strictement croissantes, avec largeur minimale, a l'interieur des gardes;
+- chaque mise a jour est tracee (`INTERVALS_CALIBRATED`) et reprogramme les seuils machine; chaque cellule est auditee avec les bornes exactes qui lui ont ete appliquees;
+- a la 100e cellule, les coupures se figent pour le reste du lot (trace `FROZEN`).
+
+Les premieres dizaines de cellules d'un bac peuvent donc chevaucher legerement la voie voisine, le temps de la convergence; c'est le prix accepte pour des bacs equilibres sur toute la production. La regression `AssertCalibrationRebalancesBiasedLot` verifie qu'un apprentissage biaise converge vers des bacs equilibres.
 
 Les bornes de tension sont construites autour de la moyenne de tension du lot avec une fenetre robuste, plafonnee par la recette.
 

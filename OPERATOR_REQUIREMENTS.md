@@ -58,7 +58,7 @@ Construire un seul logiciel desktop Windows, en francais, qui pilote vraiment la
 - Une cellule hors garde tension ou hors garde resistance part en NG.
 - La garde resistance doit prevoir une reserve adaptative pour eviter le NG massif quand les 19 cellules d'apprentissage ne couvrent pas toute la queue naturelle du lot.
 - La machine gere le plein physique; le logiciel de tri ignore les etats FULL/capacite pour decider une cellule.
-- Une fois le modele fige pour un lot, il ne doit plus bouger pendant la production.
+- Une fois le modele fige pour un lot, les gardes IR/tension et la voie NG ne bougent plus pendant la production. Les 8 coupures internes se calibrent en continu pendant les 100 premieres cellules (pas amorti vers les quantiles reels du lot, trace `INTERVALS_CALIBRATED`), puis se figent definitivement: les bacs se remplissent ainsi a ~1/9 chacun meme si l'echantillon d'apprentissage etait decale.
 - La voie NG en fenetre catch-all constructeur est le principe de securite: le PLC evalue les voies dans l'ordre 1..N avec NG en dernier, donc la voie NG ne vole pas les lignes GOOD. Toute cellule qu'aucun intervalle GOOD ne prend est poussee physiquement par le verin NG au slot 11, par l'automate. TriCell Pilot ne pulse aucun piston en production. Une voie 11 laissee hors seuils est interdite: elle laisse les cellules non matchees filer jusqu'au dechargement et declenche l'alarme dechargement (constatee les 4-8 juin 2026).
 
 6. Cohérence affichage / machine

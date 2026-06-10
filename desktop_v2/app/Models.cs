@@ -268,6 +268,7 @@ namespace SortingMachineDesktop
         public int MachineNgBaseline { get; set; }
         public RoutingLedgerState RoutingLedger { get; set; }
         public List<RoutingTicket> RoutingArchive { get; set; }
+        public List<double> CalibrationIr { get; set; }
     }
 
     public class OdooLotCandidate

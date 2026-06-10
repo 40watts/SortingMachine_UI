@@ -33,6 +33,14 @@ namespace SortingMachineDesktop
         public const string LearningLaneId = "10";
         public const string RoutingModel = "IR_9_INTERVALS";
 
+        // Calibration continue: pendant les premieres cellules de production, les 8 coupures
+        // internes glissent vers les vrais quantiles du lot mesure (jamais les gardes), puis
+        // se figent. Compense l'erreur d'echantillonnage inevitable des 19 cellules.
+        public const int CalibrationHorizonCells = 100;
+        public const int CalibrationUpdateEvery = 5;
+        public const int CalibrationMinimumCells = 15;
+        public const double CalibrationStep = 0.30;
+
         public static bool IsQualityIntervalRecipe(IntelligentRecipe recipe)
         {
             if (recipe == null || recipe.GoodLanes == null)
@@ -140,6 +148,59 @@ namespace SortingMachineDesktop
 
             rejectReason = RejectReasons.OutOfIrWindow;
             return 0;
+        }
+
+        public static bool TryCalibrateIntervals(LotReference reference, List<double> observedIr)
+        {
+            // Deplace chaque coupure interne d'un pas amorti vers le quantile empirique k/9
+            // des cellules de production observees. Les gardes IR/tension ne bougent jamais.
+            if (reference == null ||
+                reference.QualityIntervals == null ||
+                reference.QualityIntervals.Count < SortLaneCount ||
+                observedIr == null ||
+                observedIr.Count < CalibrationMinimumCells)
+            {
+                return false;
+            }
+
+            var sorted = new List<double>(observedIr);
+            sorted.Sort();
+            var guardMin = reference.IrMin;
+            var guardMax = reference.IrMax;
+            if (guardMax <= guardMin)
+            {
+                return false;
+            }
+
+            var boundaries = new List<double> { guardMin };
+            for (var i = 0; i < SortLaneCount - 1; i++)
+            {
+                boundaries.Add(reference.QualityIntervals[i].IrMax);
+            }
+            boundaries.Add(guardMax);
+
+            var moved = 0.0;
+            for (var i = 1; i < SortLaneCount; i++)
+            {
+                var target = Percentile(sorted, i / (double)SortLaneCount);
+                var next = boundaries[i] + (target - boundaries[i]) * CalibrationStep;
+                moved = Math.Max(moved, Math.Abs(next - boundaries[i]));
+                boundaries[i] = next;
+            }
+
+            EnsureStrictBoundaries(boundaries, guardMin, guardMax);
+            if (moved < 0.002)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < SortLaneCount; i++)
+            {
+                reference.QualityIntervals[i].IrMin = boundaries[i];
+                reference.QualityIntervals[i].IrMax = boundaries[i + 1];
+            }
+
+            return true;
         }
 
         public static ChannelThreshold BuildThresholdForBand(QualityBandWindows windows, int band)
